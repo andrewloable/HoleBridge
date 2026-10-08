@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Logs and test output
+*.log
+npm-debug.log*
+coverage/
+
+# HoleBridge state: host.json holds the host key, a secret. Never commit one,
+# even from a test run with --config pointing into the repo.
+host.json
+.holebridge/
+*.key
+
+# Local environment
+.env
+.env.*
+
+# OS and editors
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+
+# Claude Code per-user settings
+.claude/settings.local.json
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
