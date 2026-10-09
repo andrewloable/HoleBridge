@@ -10,14 +10,15 @@
 // its id is answered from the puncher's NAT samples (answerHolepunch), and the puncher punches toward the client
 // when the client asks. Its relay policy (relay.go) names the relay in each reply.
 //
-// The stream is claimed as upstream's server claims it (lib/server.js). A handshake that came direct, or from an
-// open client, is claimed at admission, at the address the client has. Any other handshake that came through a
-// relay is claimed only by its puncher, when a holepunch datagram arrives from an address the client named, or by
-// its relay pairing, whichever lands first. A stream that neither claims is given up when its handshake clears.
-// Upstream's raw stream also claims on the first packet from an address the relay did not name; that hook is not
-// ported, since the puncher's datagram from the client's address is what claims a relayed stream here.
+// A node that knows its own address (remoteAddress, as upstream's dht.remoteAddress) replies OPEN and keeps no holepunch
+// for the handshake, as upstream's lib/server.js does: the client connects straight to the node. The stream is claimed
+// as upstream's server claims it. A handshake that came direct, or from an open client, is claimed at admission, at the
+// address the client has. Any other handshake that came through a relay is claimed by the first packet from an address
+// that is not the relay (claimOnFirstPacket, upstream's raw stream firewall) when the reply was open, or else only by its
+// puncher, when a holepunch datagram arrives from an address the client named, or by its relay pairing, whichever lands
+// first. A stream that nothing claims is given up when its handshake clears.
 // The test seams take the direct claim out: dht.forceRelay lets only a relay pairing claim the stream, and
-// dht.forcePunch lets only the puncher claim it.
+// dht.forcePunch lets only the puncher claim it. Each keeps the reply that a node without its own address gives.
 package hyperdht
 
 import (
@@ -55,8 +56,8 @@ const (
 	handshakeReply           = 4
 )
 
-// Error codes of a handshake reply (lib/constants.js ERROR). The firewall state is left UNKNOWN (0), since
-// this node does not yet learn its own address.
+// Error codes of a handshake reply (lib/constants.js ERROR). The firewall state of the reply is OPEN (1) when this
+// node knows its own address, and UNKNOWN (0) otherwise (admit).
 const (
 	handshakeNone            = 0
 	handshakeAborted         = 1
@@ -357,12 +358,24 @@ func (s *Server) admit(kp noise.KeyPair, msg []byte, from *net.UDPAddr, direct b
 		return nil
 	}
 	forced := s.d.forceRelay
+	punched := s.d.forcePunch // only the puncher claims the stream (forcePunch)
+	// advertise says whether the reply is open: this node knows its own address (remoteAddress), and no test seam
+	// forces the route elsewhere. An open reply lets the client connect straight to this node, so the stream is claimed
+	// by the first packet from the client (claimOnFirstPacket), and no holepunch is kept for it (upstream
+	// lib/server.js, firewall ourRemoteAddr ? OPEN : UNKNOWN).
+	ours := s.d.remoteAddress()
+	advertise := ours != nil && !forced && !punched
 	var st *udx.Stream
 	var holepunch *HolepunchInfo
 	var holepunchID uint64
 	udxInfo := UDXInfo{Version: 1}
 	cl := &streamClaim{}
-	punched := s.d.forcePunch // only the puncher claims the stream (forcePunch)
+	firewall := firewallUnknown
+	var addresses4 []Address
+	if advertise {
+		firewall = firewallOpen
+		addresses4 = []Address{addressOf(ours)}
+	}
 	// claimNow says whether the stream is claimed at admission, at the address the client has. Upstream claims at once a
 	// handshake that came direct, or whose client is open (firewall OPEN), and no other: a relayed handshake waits for its
 	// puncher or its relay pairing. A forced or punched stream never claims at admission.
@@ -387,11 +400,15 @@ func (s *Server) admit(kp noise.KeyPair, msg []byte, from *net.UDPAddr, direct b
 			cl.take()
 		}
 		udxInfo.ID = uint64(st.ID())
-		holepunchID = s.reserveHolepunch()
-		holepunch = &HolepunchInfo{ID: holepunchID, Relays: s.relayList()}
+		if !advertise {
+			holepunchID = s.reserveHolepunch()
+			holepunch = &HolepunchInfo{ID: holepunchID, Relays: s.relayList()}
+		}
 	}
 	payload, err := EncodeNoisePayload(NoisePayload{
 		Error:        code,
+		Firewall:     firewall,
+		Addresses4:   addresses4,
 		Holepunch:    holepunch,
 		UDX:          &udxInfo,
 		SecretStream: &SecretStreamInfo{Version: 1},
@@ -407,10 +424,17 @@ func (s *Server) admit(kp noise.KeyPair, msg []byte, from *net.UDPAddr, direct b
 	if st != nil {
 		_, _, hash, _ := hs.Result()
 		keys := keysOf(hs)
-		slot := s.keepHolepunchWith(holepunchID, punchSecret(hash), offer != nil, st, cl)
-		s.setupHolepuncher(slot, &p, st, keys, cl, !forced || punched)
-		if punched {
-			return out
+		if advertise {
+			st.SetFirewall(s.claimOnFirstPacket(st, cl, uint32(p.UDX.ID), keys))
+			if !claimNow {
+				giveUpUnclaimed(st, cl)
+			}
+		} else {
+			slot := s.keepHolepunchWith(holepunchID, punchSecret(hash), offer != nil, st, cl)
+			s.setupHolepuncher(slot, &p, st, keys, cl, !forced || punched)
+			if punched {
+				return out
+			}
 		}
 		if claimNow {
 			go s.serve(st, keys, false)
@@ -427,6 +451,38 @@ func (s *Server) admit(kp noise.KeyPair, msg []byte, from *net.UDPAddr, direct b
 		}
 	}
 	return out
+}
+
+// claimOnFirstPacket returns the firewall of the stream st of an open reply, as upstream's raw stream firewall does
+// (lib/server.js): the first packet that arrives on st from an address claims the stream, and st connects to that
+// address, with the client's stream id remoteID, so the secret stream runs over it (keys). The claim is exclusive with
+// the puncher and the relay pairing through cl, and a packet from a port outside 1..65535 claims nothing. A test seam
+// (forceRelay, forcePunch) claims nothing here, since its one route must stand.
+func (s *Server) claimOnFirstPacket(st *udx.Stream, cl *streamClaim, remoteID uint32, keys secretstream.Keys) func(from *net.UDPAddr) bool {
+	return func(from *net.UDPAddr) bool {
+		if from == nil || from.Port < 1 || from.Port > 65535 || s.d.forceRelay || s.d.forcePunch {
+			return false
+		}
+		if !cl.take() {
+			return false
+		}
+		peer := &net.UDPAddr{IP: append(net.IP(nil), from.IP...), Port: from.Port, Zone: from.Zone}
+		if err := st.Connect(remoteID, peer); err != nil {
+			return false
+		}
+		go s.serve(st, keys, false)
+		return true
+	}
+}
+
+// giveUpUnclaimed gives st up when its handshake clears, if nothing has claimed it by then. A handshake that never
+// connects holds no stream (upstream's handshake clear destroys a stream that no path took).
+func giveUpUnclaimed(st *udx.Stream, cl *streamClaim) {
+	time.AfterFunc(handshakeClearWait, func() {
+		if cl.take() {
+			st.Destroy()
+		}
+	})
 }
 
 // reserveHolepunch returns a new holepunch id. The id goes in the reply, and the payload of the handshake is kept
@@ -743,10 +799,17 @@ func (s *Server) isRelayLocked(addr *net.UDPAddr) bool {
 }
 
 // serveRelayed claims st through a relay pairing (pairRelay) on the relay offer r, as initiator or responder, and
-// serves the claimed stream once the pairing lands. A pairing that fails, or that loses the claim to the puncher or the
-// direct path, serves nothing and leaves st alone: st is given up when its handshake clears, unless a path claims it first.
+// serves the claimed stream once the pairing lands. A pairing that fails before it takes the claim, or that loses the
+// claim to the puncher or the direct path, serves nothing and leaves st alone: st is given up when its handshake clears,
+// unless a path claims it first. A pairing that took the claim and then failed (errClaimHeld) holds st, and no other path
+// can serve it now, so st is ended here at once. Upstream also ends a stream whose relay failed (maybeDestroyRelayHandshake
+// in lib/server.js), but only after its relay recovery wait when a puncher is still there.
 func (s *Server) serveRelayed(st *udx.Stream, cl *streamClaim, r relayOffer, initiator bool, keys secretstream.Keys) {
 	rs, _, err := s.d.pairRelay(s.ctx, cl, st, r, initiator)
+	if errors.Is(err, errClaimHeld) {
+		st.Destroy()
+		return
+	}
 	if err != nil {
 		return
 	}

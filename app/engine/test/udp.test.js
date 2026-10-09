@@ -182,12 +182,12 @@ function indexOf(payload) {
 // start(options) builds a UdpServices on a fresh session, socket factory, clock and logger, and binds services on it.
 // It returns what a test needs: the object, the session, the clock, the sockets, the log, the ports and the socket of
 // the first service's port (the dns service, by default).
-async function start({ session = fakeSession(), services = [DNS] } = {}) {
+async function start({ session = fakeSession(), services = [DNS], remembered = {} } = {}) {
   const clock = fakeClock()
   const sockets = fakeSockets()
   const log = fakeLog()
   const udp = new UdpServices({ session, clock: clock.timers, log, createSocket: sockets.createSocket })
-  const ports = await udp.set(services, {})
+  const ports = await udp.set(services, remembered)
   const socket = sockets.open(ports[services[0].name])
   return { udp, session, clock, sockets, log, ports, socket }
 }
@@ -337,4 +337,122 @@ test('close() closes every socket', catchThrows(async (t) => {
   t.is(sockets.sockets.length, 2, 'two udp services, two sockets')
   await udp.close()
   t.ok(sockets.sockets.every((s) => s.closed), 'every socket is closed')
+}))
+
+test('on a direct or relay session with unordered datagrams, datagrams after the first go out unordered, even while the ordered channel is full', catchThrows(async (t) => {
+  for (const route of ['direct', 'relay']) {
+    const session = fakeSession({ route, flags: FLAG.datagrams })
+    const { socket, clock } = await start({ session })
+    socket.emit('message', b4a.from('prime'), source(50000))
+    session.setFull(true) // the ordered channel takes nothing: unordered datagrams must not wait for it
+    for (let i = 0; i < 300; i++) socket.emit('message', indexed(i, 1024), source(50000))
+    await clock.advance(0)
+    t.is(session.sent[0].kind, 'flow', `${route}: the first datagram is the flow message`)
+    const later = session.sent.slice(1)
+    t.is(later.length, 300, `${route}: none of the 300 later datagrams is dropped or held back`)
+    t.ok(
+      later.every((m) => m.kind === 'unordered' && m.flow === session.sent[0].flow),
+      `${route}: each later datagram is an unordered datagram on the flow`
+    )
+  }
+}))
+
+test('a datagram over the limit is dropped on the LAN route too, and HB-UDP-TOO-LARGE is logged once for each flow', catchThrows(async (t) => {
+  const session = fakeSession({ route: 'lan', flags: FLAG.datagrams })
+  const { socket, clock, log } = await start({ session })
+  socket.emit('message', b4a.from('a0'), source(50001))
+  socket.emit('message', b4a.from('b0'), source(50002))
+  for (const port of [50001, 50002]) {
+    socket.emit('message', oversized(1201), source(port))
+    socket.emit('message', oversized(1201), source(port))
+  }
+  await clock.advance(0)
+  t.is(session.sent.filter((m) => m.payload.length === 1201).length, 0, 'the oversize datagrams are not sent as message 10')
+  const flows = session.sent.filter((m) => m.kind === 'flow').map((m) => m.flow)
+  t.is(flows.length, 2, 'two sources, two flows')
+  const logged = log.entries.filter((e) => (e.fields || {}).code === 'HB-UDP-TOO-LARGE').map((e) => e.fields.flow)
+  t.is(logged.length, 2, 'one HB-UDP-TOO-LARGE line for each flow, not one for the process')
+  t.ok(flows.every((id) => logged.includes(id)), 'each line names its own flow')
+}))
+
+test('flow ids are unique across the udp services of a session', catchThrows(async (t) => {
+  const session = fakeSession()
+  const services = [DNS, { name: 'game', kind: 'udp', port: 27015, origins: [] }]
+  const { ports, sockets, clock } = await start({ session, services })
+  // The same source port on two services' sockets: two sources, two flows. The host finds a datagram's flow by its
+  // id alone, across all the session's services, so the two ids must differ.
+  sockets.open(ports.dns).emit('message', b4a.from('to-dns'), source(50000))
+  sockets.open(ports.game).emit('message', b4a.from('to-game'), source(50000))
+  await clock.advance(0)
+  const flows = session.sent.filter((m) => m.kind === 'flow')
+  t.alike(flows.map((m) => m.service).sort(), ['dns', 'game'], 'each service opens its own flow')
+  t.ok(flows.length === 2 && flows[0].flow !== flows[1].flow, 'the two flows have different ids')
+}))
+
+test('a reply from the host keeps the flow open, and a reply for a flow that is closed or unknown is dropped', catchThrows(async (t) => {
+  const session = fakeSession()
+  const { socket, clock } = await start({ session })
+  socket.emit('message', b4a.from('request'), source(50000))
+  await clock.advance(0)
+  const flow = session.sent[0].flow
+  await clock.advance(50_000)
+  session.emit('datagram', { flow, payload: b4a.from('reply-1') })
+  await clock.advance(0)
+  t.is(socket.sent.length, 1, 'a reply 50 s in reaches the source')
+  // 100 s after the request, 50 s after the reply: open only if a reply restarts the idle time
+  await clock.advance(50_000)
+  session.emit('datagram', { flow, payload: b4a.from('reply-2') })
+  await clock.advance(0)
+  t.alike(socket.sent.map((s) => b4a.toString(s.payload)), ['reply-1', 'reply-2'], 'a reply restarts the idle time, so the flow is still open')
+  // 60 s with no datagram either way: the flow closes
+  await clock.advance(60_000)
+  session.emit('datagram', { flow, payload: b4a.from('late') })
+  session.emit('datagram', { flow: 987654, payload: b4a.from('stray') })
+  await clock.advance(0)
+  t.is(socket.sent.length, 2, 'a reply for a closed flow or for a flow id the app never opened is dropped, and does not throw')
+}))
+
+test('set() binds the remembered port when there is one, not the service port', catchThrows(async (t) => {
+  const { ports, sockets } = await start({ remembered: { dns: 45353 } })
+  t.is(ports.dns, 45353, 'the dns service (port 53) binds the port the app remembered')
+  t.ok(sockets.open(45353) !== null, 'and its socket is bound there')
+}))
+
+test('a new source beyond 256 flows is dropped without sending, and is served again once a flow has expired', catchThrows(async (t) => {
+  const session = fakeSession()
+  const { socket, clock, log } = await start({ session })
+  for (let i = 0; i < 256; i++) socket.emit('message', b4a.from('hello'), source(20000 + i))
+  await clock.advance(0)
+  t.is(session.sent.filter((m) => m.kind === 'flow').length, 256, 'the first 256 sources each open a flow')
+  socket.emit('message', b4a.from('one too many'), source(30000))
+  socket.emit('message', b4a.from('another one'), source(30001))
+  await clock.advance(0)
+  t.is(session.sent.length, 256, 'a new source beyond 256 flows sends nothing')
+  const limited = log.entries.filter((e) => (e.fields || {}).code === 'HB-LIMIT-REACHED')
+  t.is(limited.length, 1, 'HB-LIMIT-REACHED is logged once, not for each dropped datagram')
+  t.ok(!JSON.stringify(log.entries).includes('one too many'), 'the log carries no payload bytes')
+  socket.emit('message', b4a.from('known source'), source(20000))
+  await clock.advance(0)
+  t.is(session.sent.length, 257, 'a source that already has a flow still sends')
+  t.is(session.sent[256].kind, 'unordered', 'on its flow, as an unordered datagram')
+  await clock.advance(60_000)
+  socket.emit('message', b4a.from('now there is room'), source(30000))
+  await clock.advance(0)
+  const last = session.sent[session.sent.length - 1]
+  t.is(last.kind, 'flow', 'after the flows have expired the source opens a flow')
+  t.is(b4a.toString(last.payload), 'now there is room', 'and that flow carries its datagram')
+}))
+
+test('the flow cap counts the flows of every udp service of the session', catchThrows(async (t) => {
+  const session = fakeSession()
+  const services = [DNS, { name: 'game', kind: 'udp', port: 27015, origins: [] }]
+  const { ports, sockets, clock } = await start({ session, services })
+  for (let i = 0; i < 128; i++) sockets.open(ports.dns).emit('message', b4a.from('a'), source(20000 + i))
+  for (let i = 0; i < 128; i++) sockets.open(ports.game).emit('message', b4a.from('b'), source(20000 + i))
+  await clock.advance(0)
+  t.is(session.sent.filter((m) => m.kind === 'flow').length, 256, '128 flows on each service make 256')
+  sockets.open(ports.dns).emit('message', b4a.from('c'), source(40000))
+  sockets.open(ports.game).emit('message', b4a.from('d'), source(40000))
+  await clock.advance(0)
+  t.is(session.sent.length, 256, 'a new source on either service is dropped')
 }))

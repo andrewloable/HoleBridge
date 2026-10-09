@@ -3,8 +3,8 @@
 name: Docs and notices
 
 on:
-  push:
-  pull_request:
+  release:
+    types: [published]
 
 permissions:
   contents: read

@@ -114,3 +114,15 @@ func TestShareLeavesNoHostLock(t *testing.T) {
 		t.Errorf("share left host.lock behind (stat error %v)", err)
 	}
 }
+
+// Guard for the HB-LAN-PORT-IN-USE fix text (HoleBridge-trk.16): the fix must name share, which keeps no host.json
+// and so cannot be fixed by editing one. A real host may hold the default ports, so the test reads the catalog
+// instead of binding them.
+func TestShareLANPortInUseNamesShareInTheFix(t *testing.T) {
+	fix := errs.Catalog["HB-LAN-PORT-IN-USE"].Fix
+	for _, word := range []string{"lan.port", "share"} {
+		if !strings.Contains(fix, word) {
+			t.Errorf("HB-LAN-PORT-IN-USE fix %q does not contain %q", fix, word)
+		}
+	}
+}

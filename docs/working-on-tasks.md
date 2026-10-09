@@ -99,6 +99,10 @@ not test-driven.
 
 A task's **Test command** line says which of these proves it.
 
+The GitHub Actions workflows in `.github/workflows/` run only when a person publishes a release on
+GitHub, not on pushes or pull requests. Nothing runs them for a task, so run the commands above
+yourself before the task is closed.
+
 ## Rules every task follows
 
 - **Pure Go:** no cgo, no new Go modules beyond `golang.org/x/crypto`,

@@ -53,8 +53,8 @@ class HostStore {
     return _toHosts([...records, added]).last;
   });
 
-  /// Removes a host and its ports, cert pins, services cache and kinds, LAN addresses and port, and VPN
-  /// addresses.
+  /// Removes a host and its ports, cert pins, services cache and kinds, LAN addresses and port, Share with
+  /// my network setting, and VPN addresses.
   Future<void> removeHost(String id) => _write(() async {
     await _saveRecords((await _records()).where((record) => record.id != id).toList());
     await _backend.delete(_stateKey(id));
@@ -107,10 +107,11 @@ class HostStore {
 
   /// Whether Share with my network is on for a host: its listeners bind 0.0.0.0 instead of 127.0.0.1
   /// (docs/cli.md#the-app). False until it is saved, and for a state file written before the setting.
-  Future<bool> shared(String hostId) => throw UnimplementedError();
+  Future<bool> shared(String hostId) async => (await _state(hostId)).shared;
 
   /// Saves the Share with my network setting of a host. Refuses an unknown host with a StateError.
-  Future<void> saveShared(String hostId, bool shared) => throw UnimplementedError();
+  Future<void> saveShared(String hostId, bool shared) =>
+      _update(hostId, (state) => state.shared = shared);
 
   /// The certificate pin of one service of a host, or null when none is set.
   Future<String?> certPins(String hostId, String service) async =>
@@ -222,13 +223,14 @@ class _Record {
 }
 
 /// The per-host state that is not the host record: services and their kinds, ports, cert pins, LAN
-/// addresses and port, and VPN addresses. Kinds and the LAN port are read as none when a state file
-/// does not have them.
+/// addresses and port, the Share with my network setting, and VPN addresses. Kinds, the LAN port and the
+/// setting are read as none (off) when a state file does not have them.
 class _HostState {
   _HostState.fromJson(Map<String, dynamic> json)
     : services = List<String>.from(json['services'] as List? ?? const []),
       kinds = Map<String, int>.from(json['kinds'] as Map? ?? const {}),
       lanPort = (json['lanPort'] as int?) ?? 0,
+      shared = (json['shared'] as bool?) ?? false,
       ports = Map<String, int>.from(json['ports'] as Map? ?? const {}),
       pins = Map<String, String>.from(json['pins'] as Map? ?? const {}),
       lan = List<String>.from(json['lan'] as List? ?? const []),
@@ -237,6 +239,7 @@ class _HostState {
   List<String> services;
   Map<String, int> kinds;
   int lanPort;
+  bool shared;
   final Map<String, int> ports;
   final Map<String, String> pins;
   List<String> lan;
@@ -246,6 +249,7 @@ class _HostState {
     'services': services,
     'kinds': kinds,
     'lanPort': lanPort,
+    'shared': shared,
     'ports': ports,
     'pins': pins,
     'lan': lan,

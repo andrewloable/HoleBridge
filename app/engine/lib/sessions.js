@@ -20,6 +20,12 @@
 // - 'lan' with { host, addresses, port }, when a session that comes up carries the host's LAN block. Dart stores these.
 //   It is emitted before the 'session' up event.
 //
+// Open streams survive a drop and a route change (docs/architecture.md, "Streams survive a reconnect and a route
+// change"). When a session drops with streams open, they wait GRACE_MS (60 s, on the clock) for a new session: the
+// first session that comes up takes them over with adopt(), and so does a route change that hands the host to a new
+// session while the old one is still up. When none comes in time, the dropped session is destroyed, which ends its
+// streams.
+//
 // The contract (pinned by test/sessions.test.js):
 // - routeManagerFor(host) is called when a host with no live manager gets a call that needs one. A manager closed by
 //   Sessions is never reused.
@@ -54,6 +60,9 @@ const EventEmitter = require('bare-events')
 const LOOKUP_TIMEOUT = 'HB-LOOKUP-TIMEOUT'
 const VERSION_MISMATCH = 'HB-VERSION-MISMATCH'
 const CONNECTED_ROUTES = ['lan', 'direct', 'relay']
+// How long the open streams of a dropped session wait for a new session (docs/architecture.md, "Sessions and
+// reconnects"): the new session takes them over, and when none comes in time they end.
+const GRACE_MS = 60 * 1000
 
 // hbError makes an error that carries an HB code and the reason, as lib/routes.js does.
 function hbError(code, reason) {
@@ -80,7 +89,9 @@ function newEntry(host) {
     waiters: new Set(), // calls waiting for a session: { kind: 'ensure' | 'open', service, resolve, reject, timer }
     registered: false, // ensure() asked for the host: its search runs until close(host) or the idle end
     idleTimer: null,
-    closed: false // close(host) ran: the entry takes no more timers
+    closed: false, // close(host) ran: the entry takes no more timers
+    held: null, // a session that dropped while streams were open: they wait for a new session during the grace period
+    graceTimer: null // the timer that ends the grace period of held
   }
 }
 
@@ -200,11 +211,14 @@ class Sessions extends EventEmitter {
 
   #sessionUp(entry, session) {
     if (entry.session === session) return // the manager announced the live route again
+    const held = this.#unhold(entry) // a session that dropped and is still in its grace period
+    const prev = entry.session || held // the session whose open streams move to this one, if any
     const handover = entry.session !== null
     entry.session = session
     session.on('close', () => this.#sessionClosed(entry, session))
     if (session.lan) this.emit('lan', { host: entry.host, addresses: session.lan.addresses, port: session.lan.port })
     if (!handover) this.emit('session', { host: entry.host, up: true })
+    if (prev && entry.streams > 0) this.#takeStreams(session, prev)
     for (const waiter of [...entry.waiters]) {
       this.#drop(entry, waiter)
       if (waiter.kind === 'ensure') {
@@ -217,12 +231,49 @@ class Sessions extends EventEmitter {
     this.#evaluateIdle(entry)
   }
 
-  // #sessionClosed handles a session that ends on its own: a drop. The manager reconnects by itself.
+  // #sessionClosed handles a session that ends on its own: a drop. The manager reconnects by itself. Open streams keep
+  // their sockets for the grace period, and a session that comes up in time takes them over.
   #sessionClosed(entry, session) {
     if (entry.session !== session) return // handed over, or ended by Sessions itself
     entry.session = null
     this.emit('session', { host: entry.host, up: false })
+    if (entry.streams > 0) this.#hold(entry, session)
     this.#evaluateIdle(entry)
+  }
+
+  // #hold keeps a dropped session, whose streams wait, until GRACE_MS have passed on the clock.
+  #hold(entry, session) {
+    entry.held = session
+    entry.graceTimer = this.#clock.setTimeout(() => this.#graceExpired(entry, session), GRACE_MS)
+  }
+
+  // #graceExpired ends the streams of a dropped session that no new session took over in time. The session is already
+  // down, so destroy() only ends its streams; the manager is still looking and is left alone.
+  #graceExpired(entry, session) {
+    if (entry.held !== session) return
+    entry.held = null
+    entry.graceTimer = null
+    session.destroy()
+  }
+
+  // #unhold forgets the session that a drop left holding streams, and stops its grace timer. It returns that session,
+  // or null.
+  #unhold(entry) {
+    if (entry.graceTimer !== null) this.#clock.clearTimeout(entry.graceTimer)
+    entry.graceTimer = null
+    const held = entry.held
+    entry.held = null
+    return held
+  }
+
+  // #takeStreams moves the open streams of prev, a dropped or handed-over session, to session. If they cannot move,
+  // they end, as they would without resume.
+  #takeStreams(session, prev) {
+    try {
+      session.adopt(prev)
+    } catch {
+      prev.destroy()
+    }
   }
 
   // #openOn opens a stream on a session. The caller counted the call as a use; this ends that use.
@@ -285,9 +336,11 @@ class Sessions extends EventEmitter {
     this.#cancelIdle(entry)
     const manager = entry.manager
     const wasUp = entry.session !== null
+    const held = this.#unhold(entry)
     entry.manager = null
     entry.session = null
     if (manager) manager.close()
+    if (held) held.destroy()
     if (wasUp) this.emit('session', { host: entry.host, up: false })
   }
 

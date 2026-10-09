@@ -107,6 +107,9 @@ type Stream struct {
 
 	msgs chan []byte // unordered messages from the peer, see message.go
 
+	// firewall is the hook for the packets that arrive while the stream is not connected (SetFirewall).
+	firewall func(from *net.UDPAddr) bool
+
 	// The route of the stream and a remote change (ChangeRemote). ch is the route the stream's socket delivers its
 	// packets to. aliased lists the sockets that still route to ch for the packets of the old path. changed is open
 	// while the packets sent before the change are unacked, and changeSeq is the seq the old path's last packet had.
@@ -288,7 +291,9 @@ func (st *Stream) run(ch <-chan Packet) {
 				st.mu.Unlock()
 				return
 			}
-			st.handle(pk)
+			if st.admit(pk) {
+				st.handle(pk)
+			}
 		case <-st.done:
 			return
 		}

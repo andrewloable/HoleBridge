@@ -734,6 +734,7 @@ func holderOtherThanServer(t *testing.T, tn *Testnet, host [32]byte, server *net
 // NONE, encrypted with the same secret. Upstream probes this way in probeRound (lib/connect.js).
 func TestPeerHolepunchAnsweredByServer(t *testing.T) {
 	tn := startTestnet(t, 10)
+	hideRemoteAddress(t, tn.Nodes[0]) // the server answers with a holepunch, as a server that does not know its address does
 	host := testKeyPair(3)
 	srv := newServer(t, tn.Nodes[0], ServerOptions{})
 	listenOn(t, srv, host)

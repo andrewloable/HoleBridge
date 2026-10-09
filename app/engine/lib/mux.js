@@ -1,7 +1,7 @@
 // Stream multiplexer of the app engine: streams, credit flow control, the receive budget, the close
-// handshake, the stream limits and the malformed-input rules of protocol v1 (docs/architecture.md, "Flow
-// control", "Limits" and "Malformed input"). The Go host has the same design in internal/mux, and the two
-// must agree.
+// handshake, the stream limits, stream resume and the malformed-input rules of protocol v1 (docs/architecture.md,
+// "Flow control", "Limits", "Streams survive a reconnect and a route change" and "Malformed input"). The Go host
+// has the same design in internal/mux, and the two must agree.
 
 const { Duplex } = require('streamx')
 const b4a = require('b4a')
@@ -17,10 +17,16 @@ const MAX_CHUNK = 64 * 1024
 // its close (window, close, opened, reject) are ignored in that time instead of ending the session.
 const CLOSED_GRACE = 60 * 1000
 
+// KEEP_PER_STREAM and KEEP_TOTAL cap the bytes a resumable session keeps for resending: per stream, and in all
+// over the process. A write that would keep more closes its stream, as it would without resume.
+const KEEP_PER_STREAM = 4 * MIB
+const KEEP_TOTAL = 32 * MIB
+
 const RESET = new Error('stream reset')
 const CLOSED = new Error('stream closed')
 const CANCELLED = new Error('open cancelled')
 const SESSION_CLOSED = new Error('session closed')
+const KEPT_TOO_MUCH = new Error('too many bytes kept for resume')
 
 function noop() {}
 
@@ -124,13 +130,40 @@ class Counter {
   }
 }
 
+// Keep is the bytes kept for resending, shared by the sessions of a process (KEEP_TOTAL in all). A resumable
+// session takes bytes from it as it sends them and gives them back as the peer acknowledges them. Callers take no
+// more than room(), so take() does not check the total.
+class Keep {
+  constructor(total = KEEP_TOTAL) {
+    this.total = total
+    this.used = 0 // bytes kept and not yet acknowledged, over all streams
+  }
+
+  room() {
+    return sub(this.total, this.used)
+  }
+
+  take(n) {
+    this.used += n
+  }
+
+  give(n) {
+    this.used = sub(this.used, n)
+  }
+}
+
 // Session is one protocol v1 session: its streams, their credit and their share of the budget.
 // send(index, message) carries a message to the other side. accept(service) is called on the host for
 // each open; a non-zero code in its result rejects the stream, and target(stream) gets the host's side
 // of an accepted stream after opened is sent. clock() returns the time in milliseconds (Date.now by
-// default) and only times the memory of finished ids.
+// default) and only times the memory of finished ids. datagram(m) gets each datagram message (10) from the
+// other side, as { flow, payload }; it is not stream data and does not touch the streams. keep is the Keep the
+// streams charge the bytes they keep to (a session of its own by default).
 class Session {
-  constructor({ role, send, window = 2 * MIB, maxStreams = 128, counter, budget, accept, clock = Date.now }) {
+  constructor({
+    role, send, window = 2 * MIB, maxStreams = 128, counter, budget, accept, clock = Date.now, datagram = noop,
+    keep = new Keep()
+  }) {
     this.role = role
     this.send = send
     this.window = window
@@ -139,11 +172,15 @@ class Session {
     this.budget = budget
     this.accept = accept
     this.clock = clock
+    this.datagram = datagram
+    this.keep = keep
     this.streams = new Map() // the streams the session still holds
     this.gone = new Map() // ids finished or refused, and when (ms)
     this.slots = 0 // streams holding a slot of this session
     this.closed = false
     this.lastId = 0
+    this.resumable = false // set by enableResume: the streams keep their bytes and survive detach
+    this.detached = false // the transport died while resumable: the streams wait for adopt
   }
 
   // receive takes one decoded message from the other side. It throws SessionError when the session
@@ -156,6 +193,13 @@ class Session {
       case 3: return this.onData(message)
       case 4: return this.onWindow(message)
       case 5: return this.onClose(message)
+      // The host never sends a reattach (6): the app is the side that reattaches. A reattached (7) answers ours.
+      case 6: throw new SessionError('message 6 (reattach) is never sent to the app')
+      case 7: return this.onReattached(message)
+      // The host never sends a flow (9): the app only opens flows. A flow from the peer breaks the protocol.
+      case 9: throw new SessionError('message 9 (flow) is never sent to the app')
+      // A datagram (10) belongs to a UDP flow, not to a stream: it keeps no offset, credit or slot.
+      case 10: return this.datagram(message)
     }
     throw new SessionError(`message ${index} is not implemented yet`)
   }
@@ -165,7 +209,7 @@ class Session {
   // abort of signal before opened cancels the open. Only the app role opens streams.
   async open(service, { signal } = {}) {
     if (this.role !== 'app') throw new Error('only the app role opens streams')
-    if (this.closed) throw SESSION_CLOSED
+    if (this.closed || this.detached) throw SESSION_CLOSED
     if (signal && signal.aborted) throw CANCELLED
     if (!this.takeSlot()) throw new RejectError(REJECT.limitReached, 'limit reached')
     const id = ++this.lastId
@@ -236,6 +280,7 @@ class Session {
     const { resolve } = st.pending
     st.pending = null
     st.sendLimit = m.window
+    if (this.resumable) st.token = copyOf(m.token) // the host's resume token: a reattach carries it
     resolve(st)
   }
 
@@ -258,6 +303,9 @@ class Session {
       throw new SessionError(`data for stream ${m.stream}, which was never opened`)
     }
     if (st.err) return
+    // Data that arrives while the stream reattaches is dropped: the host may still be sending into the old session's
+    // gap, and it resends from the offset in reattached.
+    if (st.reattaching) return
     const n = m.payload.length
     if (st.pending || st.rclosed || st.received + n > st.limit) {
       // Data before opened, data after the peer's close, or data past the credit: only this stream is
@@ -276,7 +324,8 @@ class Session {
       if (this.recent(m.stream)) return
       throw new SessionError(`window for stream ${m.stream}, which was never opened`)
     }
-    if (st.err) return
+    if (st.err || st.reattaching) return // a window that arrives while the stream reattaches is ignored, as data is
+    st.ack(m.received)
     st.sendLimit += m.credit
     st.wakeWriter()
   }
@@ -295,6 +344,11 @@ class Session {
     if (st.pending) {
       st.stop(RESET) // the peer ended the stream before opened
       if (st.finishWrite()) this.send(5, { stream: m.stream })
+    } else if (st.reattaching) {
+      // The host refused the reattach with close and sent no reattached: the stream ends here, and our close goes back.
+      st.reattaching = false
+      st.reset()
+      if (st.wclosed) st.complete()
     } else if (st.wclosed) {
       st.complete()
     }
@@ -321,20 +375,73 @@ class Session {
   // reconnect and a route change"). The connection calls it when the handshake carries FLAG.resume, before the
   // session opens streams.
   enableResume() {
-    throw new Error('not implemented')
+    if (this.role !== 'app') throw new Error('only the app role enables resume')
+    if (this.resumable) return
+    if (this.closed || this.streams.size > 0) throw new Error('enable resume before the session opens streams')
+    this.resumable = true
   }
 
   // detach is called when the transport dies. A resumable session keeps its streams: they stall, their Stream
   // objects stay open and they wait for adopt. A session without resume closes its streams at once.
   detach() {
-    throw new Error('not implemented')
+    if (this.closed || this.detached) return
+    if (!this.resumable) {
+      this.destroy()
+      return
+    }
+    this.detached = true
+    // A stream still opening has no token to reattach with, so it fails, as it would without resume.
+    for (const st of [...this.streams.values()]) {
+      if (st.pending) {
+        st.stop(SESSION_CLOSED)
+        this.forget(st)
+      }
+    }
   }
 
   // adopt makes this new app session take over the streams that prev detached. Each one is sent a reattach with
   // its token, the bytes received and its limit, and this session ignores the data and window of a stream until
-  // reattached arrives. The Stream objects stay the same.
+  // reattached arrives. The Stream objects stay the same. If prev is still attached, adopt detaches it first, as the
+  // Go Session.Adopt does.
   adopt(prev) {
-    throw new Error('not implemented')
+    if (this.role !== 'app' || prev.role !== 'app') throw new Error('only app sessions adopt streams')
+    if (prev === this) throw new Error('a session cannot adopt its own streams')
+    prev.detach()
+    if (!this.resumable || this.closed || this.detached) {
+      throw new Error('the new session must be an open session with resume on')
+    }
+    const live = [...prev.streams.values()].filter((st) => !st.err)
+    if (this.maxStreams > 0 && this.slots + live.length > this.maxStreams) {
+      throw new Error('the new session has no room for the streams it adopts')
+    }
+    for (const st of [...prev.streams.values()]) {
+      if (st.err) prev.forget(st) // a stream that failed while it waited is not resumed
+    }
+    for (const st of live) {
+      // The stream keeps its slot and its budget: the slot counter and the budget are shared by the sessions.
+      prev.streams.delete(st.id)
+      prev.slots--
+      this.streams.set(st.id, st)
+      this.slots++
+      st.session = this
+      st.reattaching = true
+      st.reported = st.limit
+      this.send(6, { stream: st.id, token: st.token, received: st.received, limit: st.limit })
+    }
+    if (prev.lastId > this.lastId) this.lastId = prev.lastId
+  }
+
+  // onReattached completes a reattach on this session: the host's received count frees the bytes it took, the bytes
+  // it did not take are resent in order, and its limit becomes the send limit.
+  onReattached(m) {
+    const st = this.streams.get(m.stream)
+    if (!st || !st.reattaching) throw new SessionError(`reattached for stream ${m.stream}, which is not reattaching`)
+    if (!st.err) {
+      st.ack(m.received)
+      st.sendLimit = m.limit
+      for (const k of st.kept) this.send(3, { stream: st.id, payload: k.data })
+    }
+    st.finishReattach()
   }
 
   // takeSlot takes a stream slot: one of the session's maxStreams and one of the shared counter. It
@@ -400,6 +507,13 @@ class Stream extends Duplex {
     this.flushes = [] // the callbacks of the writes not yet sent, in order
     this.wclosed = false // our close is sent, or the write side is closed locally
     this.rclosed = false // the peer's close came
+    this.keep = session.keep // the Keep the bytes this stream keeps are charged to
+    this.kept = [] // sent bytes the peer has not acknowledged, as { start, data }: resumable sessions only
+    this.acked = 0 // bytes of ours the peer has received
+    this.token = b4a.alloc(16) // the host's resume token, from opened (app role)
+    this.reattaching = false // adopted, waiting for reattached: data and window are ignored until then
+    this.reported = 0 // the limit the reattach carried: credit granted after it goes out as one window
+    this.closeHeld = false // our close waits for the reattach, since the stream stalled when it was due
   }
 
   _read(cb) {
@@ -500,9 +614,16 @@ class Stream extends Duplex {
   extend(g) {
     if (g > 0) {
       this.limit += g
-      this.session.send(4, { stream: this.id, credit: g, received: this.received })
+      // While the stream stalls, the credit waits for the reattach: the reattach carries the limit, and finishReattach
+      // sends the rest as one window.
+      if (!this.stalled()) this.session.send(4, { stream: this.id, credit: g, received: this.received })
     }
     this.track()
+  }
+
+  // stalled reports whether the stream waits for a reattach: its session is detached, or it is reattaching.
+  stalled() {
+    return this.reattaching || this.session.detached
   }
 
   // track keeps the stream in the budget's starved set while it has no credit for the peer, so the budget
@@ -532,25 +653,38 @@ class Stream extends Duplex {
     attempt()
   }
 
-  // sendData sends data in data messages, each one waiting for the credit it needs.
+  // sendData sends data in data messages, each one waiting for the credit it needs. A resumable stream keeps a copy of
+  // each message's bytes until the peer acknowledges them, for a resend after a reattach.
   async sendData(data) {
     let n = 0
     while (n < data.length) {
       const k = await this.reserve(data.length - n)
-      this.session.send(3, { stream: this.id, payload: data.subarray(n, n + k) })
+      const payload = data.subarray(n, n + k)
+      if (this.session.resumable) this.kept.push({ start: this.sent - k, data: copyOf(payload) })
+      this.session.send(3, { stream: this.id, payload })
       n += k
     }
   }
 
   // reserve waits until the peer has credit, then takes up to want bytes of it, at most one data
-  // message's worth.
+  // message's worth. It waits while the stream stalls for a reattach, and on a resumable session it takes the
+  // bytes it keeps from the caps: a write that would keep more closes the stream.
   reserve(want) {
     return new Promise((resolve, reject) => {
       const attempt = () => {
         if (this.err) return reject(this.err)
         if (this.wclosed) return reject(CLOSED)
+        if (this.stalled()) {
+          this.writeWait = attempt
+          return
+        }
         if (this.sendLimit > this.sent) {
-          const k = Math.min(want, this.sendLimit - this.sent, MAX_CHUNK)
+          let k = Math.min(want, this.sendLimit - this.sent, MAX_CHUNK)
+          if (this.session.resumable) {
+            k = Math.min(k, KEEP_PER_STREAM - (this.sent - this.acked), this.keep.room())
+            if (k <= 0) return this.keepOverflow(reject)
+            this.keep.take(k)
+          }
           this.sent += k
           return resolve(k)
         }
@@ -558,6 +692,52 @@ class Stream extends Duplex {
       }
       attempt()
     })
+  }
+
+  // keepOverflow ends a stream whose write would keep more bytes than the caps allow. It fails as a reset does: the
+  // stream stops, close goes out, and the stream is destroyed without an error event, since the write that asked
+  // for the bytes reports the failure.
+  keepOverflow(reject) {
+    this.stop(KEPT_TOO_MUCH)
+    if (this.finishWrite()) this.session.send(5, { stream: this.id })
+    this.destroy()
+    reject(this.err)
+  }
+
+  // ack drops the kept bytes the peer has received: received is its count of the bytes this stream sent. A stream on
+  // a session without resume keeps nothing.
+  ack(received) {
+    if (!this.session.resumable) return
+    const n = Math.min(received, this.sent)
+    if (n <= this.acked) return
+    this.keep.give(n - this.acked)
+    this.acked = n
+    while (this.kept.length > 0 && this.kept[0].start + this.kept[0].data.length <= n) this.kept.shift()
+    const first = this.kept[0]
+    if (first && first.start < n) this.kept[0] = { start: n, data: first.data.subarray(n - first.start) }
+  }
+
+  // dropKept gives back the bytes the stream still keeps, once it ends.
+  dropKept() {
+    if (!this.session.resumable) return
+    this.keep.give(this.sent - this.acked)
+    this.acked = this.sent
+    this.kept = []
+  }
+
+  // finishReattach ends the reattach of st once the reattached is in: the credit granted meanwhile goes out as one
+  // window, and our close goes out after it on every reattach, also when it was sent before the drop and the link
+  // may have lost it (docs/architecture.md, "Both closes"). The peer ignores a repeated close.
+  finishReattach() {
+    this.reattaching = false
+    if (!this.err && this.limit > this.reported) {
+      this.session.send(4, { stream: this.id, credit: this.limit - this.reported, received: this.received })
+    }
+    if (this.wclosed) {
+      this.closeHeld = false
+      this.session.send(5, { stream: this.id })
+    }
+    this.wakeWriter()
   }
 
   // stop ends the stream with err: the bytes not yet read are dropped, the credit and the slot go back,
@@ -586,11 +766,16 @@ class Stream extends Duplex {
   }
 
   // finishWrite closes the write side. It reports whether our close must be sent now, and completes the
-  // stream when the peer's close has already come.
+  // stream when the peer's close has already come. While the stream stalls for a reattach, the close is held
+  // back, and finishReattach sends it.
   finishWrite() {
     if (this.wclosed) return false
     this.wclosed = true
     if (this.rclosed) this.complete()
+    if (this.stalled()) {
+      this.closeHeld = true
+      return false
+    }
     return true
   }
 
@@ -606,6 +791,7 @@ class Stream extends Duplex {
       this.live = false
       this.session.budget.starved.delete(this)
       this.session.budget.retire(this.limit - this.consumed)
+      this.dropKept()
     }
     if (this.slot) {
       this.slot = false
@@ -615,4 +801,4 @@ class Stream extends Duplex {
 }
 
 // Stream is not exported: callers get streams from open, and the host gets its side from target.
-module.exports = { Session, Budget, Counter, SessionError, RejectError }
+module.exports = { Session, Budget, Counter, Keep, SessionError, RejectError }

@@ -27,6 +27,8 @@ typedef ScannerBuilder = Widget Function(BuildContext context, void Function(Str
 /// hides Scan QR and shows Add from phone; the app detects a TV, and tests pass it. [onAddFromPhone]
 /// runs when Add from phone is pressed. [initialLink] is the link the app was opened with (/k), shown
 /// pre-filled. It is not used yet: HoleBridge-hb5.10.8 wires it.
+///
+/// [onOpenSettings] runs when the Settings button in the app bar is pressed. Null hides the button.
 class AddHostScreen extends StatefulWidget {
   const AddHostScreen({
     super.key,
@@ -37,6 +39,7 @@ class AddHostScreen extends StatefulWidget {
     this.isTv = false,
     this.onAddFromPhone,
     this.initialLink,
+    this.onOpenSettings,
   });
 
   final AppController controller;
@@ -46,6 +49,7 @@ class AddHostScreen extends StatefulWidget {
   final bool isTv;
   final VoidCallback? onAddFromPhone;
   final String? initialLink;
+  final VoidCallback? onOpenSettings;
 
   @override
   State<AddHostScreen> createState() => _AddHostScreenState();
@@ -257,7 +261,17 @@ class _AddHostScreenState extends State<AddHostScreen> {
     // Scan QR is hidden on a TV, and where the device has no camera.
     final scanner = widget.isTv ? null : widget.scannerBuilder;
     return Scaffold(
-      appBar: AppBar(title: const Text('New host')),
+      appBar: AppBar(
+        title: const Text('New host'),
+        actions: [
+          if (widget.onOpenSettings != null)
+            IconButton(
+              icon: const Icon(Icons.settings),
+              tooltip: 'Settings',
+              onPressed: widget.onOpenSettings,
+            ),
+        ],
+      ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
@@ -273,7 +287,9 @@ class _AddHostScreenState extends State<AddHostScreen> {
                 FilledButton(onPressed: _busy ? null : _startScan, child: const Text('Scan QR')),
               OutlinedButton(onPressed: _busy ? null : _pasteLink, child: const Text('Paste link')),
               if (widget.isTv)
+                // The first focus of a TV lands here: it is the screen's primary action.
                 FilledButton(
+                  autofocus: true,
                   onPressed: _busy ? null : widget.onAddFromPhone,
                   child: const Text('Add from phone'),
                 ),

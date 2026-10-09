@@ -2,6 +2,7 @@ package kinds
 
 import (
 	"context"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -370,4 +371,128 @@ func TestWatcherInconclusiveBreaksTCPStreak(t *testing.T) {
 	if k := w.Kind("web"); k != protocol.KindTCP {
 		t.Fatalf("after probe 4 (second consecutive tcp): kind %d, want %d (tcp)", k, protocol.KindTCP)
 	}
+}
+
+// Reload adds a service: Run probes it at once, Kind reports the detected kind, and kinds.json saves it.
+func TestWatcherReloadAddsServiceAndProbesIt(t *testing.T) {
+	defer failOnPanic(t)
+	const target = "127.0.0.1:8080"
+	dir := t.TempDir()
+	f := newFakeDetect(map[string][]answer{target: {httpAnswer}})
+	w := newTestWatcher(&config.Config{Services: map[string]config.Service{}}, dir, f, newFakeClock())
+	start(t, w)
+
+	w.Reload(&config.Config{Services: map[string]config.Service{"web": {Target: target}}})
+	waitFor(t, "the probe of the added service", func() bool { return w.Kind("web") == protocol.KindHTTP })
+	waitFor(t, "the added service to be saved in kinds.json", func() bool { return savedKind(t, dir, "web") == "http" })
+	if n := f.count(target); n != 1 {
+		t.Fatalf("probes of the added service = %d, want 1", n)
+	}
+}
+
+// Reload removes a service: Kind reports unknown at once, and kinds.json no longer lists it.
+func TestWatcherReloadRemovesService(t *testing.T) {
+	defer failOnPanic(t)
+	const target = "127.0.0.1:8080"
+	dir := t.TempDir()
+	cfg := &config.Config{Services: map[string]config.Service{"web": {Target: target}}}
+	f := newFakeDetect(map[string][]answer{target: {httpAnswer}})
+	w := newTestWatcher(cfg, dir, f, newFakeClock())
+	start(t, w)
+	waitFor(t, "web to be detected and saved", func() bool {
+		return w.Kind("web") == protocol.KindHTTP && savedKind(t, dir, "web") == "http"
+	})
+
+	w.Reload(&config.Config{Services: map[string]config.Service{}})
+	if k := w.Kind("web"); k != protocol.KindUnknown {
+		t.Fatalf("Kind(web) after removal = %d, want %d (unknown)", k, protocol.KindUnknown)
+	}
+	if got := savedKind(t, dir, "web"); got != "" {
+		t.Fatalf("kinds.json still holds web = %q after removal, want none", got)
+	}
+}
+
+// Reload keeps the state of a service whose target and kind did not change: its detected kind stays and it is not
+// probed again. A service that is added beside it is probed.
+func TestWatcherReloadKeepsUnchangedService(t *testing.T) {
+	defer failOnPanic(t)
+	const web, fresh = "127.0.0.1:8080", "127.0.0.1:9090"
+	cfg := &config.Config{Services: map[string]config.Service{"web": {Target: web}}}
+	f := newFakeDetect(map[string][]answer{web: {httpAnswer}, fresh: {tcpAnswer}})
+	w := newTestWatcher(cfg, t.TempDir(), f, newFakeClock())
+	start(t, w)
+	waitFor(t, "web to be detected", func() bool { return w.Kind("web") == protocol.KindHTTP })
+
+	w.Reload(&config.Config{Services: map[string]config.Service{
+		"web": {Target: web},
+		"new": {Target: fresh},
+	}})
+	waitFor(t, "the probe of the added service", func() bool { return w.Kind("new") == protocol.KindTCP })
+	quiet()
+	if k := w.Kind("web"); k != protocol.KindHTTP {
+		t.Fatalf("Kind(web) after reload = %d, want %d (http) kept", k, protocol.KindHTTP)
+	}
+	if n := f.count(web); n != 1 {
+		t.Fatalf("probes of the unchanged service = %d, want 1: it must not be probed again", n)
+	}
+}
+
+// Reload probes a service whose target changed, at the new target.
+func TestWatcherReloadProbesChangedTarget(t *testing.T) {
+	defer failOnPanic(t)
+	const old, moved = "127.0.0.1:8080", "127.0.0.1:8081"
+	cfg := &config.Config{Services: map[string]config.Service{"web": {Target: old}}}
+	f := newFakeDetect(map[string][]answer{old: {httpAnswer}, moved: {httpAnswer}})
+	w := newTestWatcher(cfg, t.TempDir(), f, newFakeClock())
+	start(t, w)
+	waitFor(t, "web to be detected", func() bool { return w.Kind("web") == protocol.KindHTTP })
+
+	w.Reload(&config.Config{Services: map[string]config.Service{"web": {Target: moved}}})
+	waitFor(t, "the probe of the new target", func() bool { return f.count(moved) == 1 })
+	quiet()
+	if n := f.count(old); n != 1 {
+		t.Fatalf("probes of the old target = %d, want 1", n)
+	}
+}
+
+// With no config directory (share), Reload and the probes write no kinds.json, and nothing is read from disk.
+func TestWatcherWithoutDirectoryWritesNothing(t *testing.T) {
+	defer failOnPanic(t)
+	t.Chdir(t.TempDir())
+	const web, fresh = "127.0.0.1:8080", "127.0.0.1:9090"
+	cfg := &config.Config{Services: map[string]config.Service{"web": {Target: web}}}
+	f := newFakeDetect(map[string][]answer{web: {httpAnswer}, fresh: {tcpAnswer}})
+	w := newTestWatcher(cfg, "", f, newFakeClock())
+	start(t, w)
+	waitFor(t, "web to be detected", func() bool { return w.Kind("web") == protocol.KindHTTP })
+
+	w.Reload(&config.Config{Services: map[string]config.Service{"new": {Target: fresh}}})
+	waitFor(t, "the probe of the added service", func() bool { return w.Kind("new") == protocol.KindTCP })
+	quiet()
+	if _, err := os.Stat("kinds.json"); err == nil {
+		t.Fatal("kinds.json was written in the current directory with no config directory")
+	}
+}
+
+// A target that host.json writes as a bare port is dialed on loopback, as the host dials it, so the watcher probes
+// 127.0.0.1:port and detects the kind. A bare-port service added by Reload is probed the same way.
+func TestWatcherProbesBarePortTargetOnLoopback(t *testing.T) {
+	defer failOnPanic(t)
+	const web, fresh = "127.0.0.1:8080", "127.0.0.1:9090"
+	cfg := &config.Config{Services: map[string]config.Service{"web": {Target: "8080"}}}
+	f := newFakeDetect(map[string][]answer{web: {httpAnswer}, fresh: {tcpAnswer}})
+	w := newTestWatcher(cfg, t.TempDir(), f, newFakeClock())
+	start(t, w)
+	waitFor(t, "web to be detected at 127.0.0.1:8080", func() bool { return w.Kind("web") == protocol.KindHTTP })
+	if n := f.count(web); n != 1 {
+		t.Fatalf("probes of %s = %d, want 1", web, n)
+	}
+
+	w.Reload(&config.Config{Services: map[string]config.Service{
+		"web": {Target: "8080"},
+		"new": {Target: "9090"},
+	}})
+	waitFor(t, "the probe of the added bare-port service at 127.0.0.1:9090", func() bool {
+		return w.Kind("new") == protocol.KindTCP
+	})
 }

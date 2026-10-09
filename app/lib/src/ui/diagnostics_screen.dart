@@ -67,9 +67,8 @@ class DiagnosticsScreen extends StatelessWidget {
                     spacing: 8,
                     runSpacing: 8,
                     children: [
-                      FilledButton(
+                      _CopyButton(
                         onPressed: stored == null ? null : () => _copy(reportText, stored.secrets),
-                        child: const Text('Copy diagnostics'),
                       ),
                       OutlinedButton(
                         onPressed: stored == null
@@ -169,6 +168,46 @@ class DiagnosticsScreen extends StatelessWidget {
       'body': redact(reportText, secrets),
     });
     await (openLink ?? _launch)(url);
+  }
+}
+
+/// The Copy diagnostics button, the screen's first focus. It is off until the store has been read, and a
+/// disabled button cannot take focus, so a plain autofocus (tried at the first build) would miss it. This
+/// asks for the focus once the button turns on.
+class _CopyButton extends StatefulWidget {
+  const _CopyButton({required this.onPressed});
+
+  final VoidCallback? onPressed;
+
+  @override
+  State<_CopyButton> createState() => _CopyButtonState();
+}
+
+class _CopyButtonState extends State<_CopyButton> {
+  final _focus = FocusNode(debugLabel: 'copy-diagnostics');
+
+  /// Whether the focus has been asked for, so a later rebuild does not move it back.
+  bool _asked = false;
+
+  @override
+  void dispose() {
+    _focus.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (widget.onPressed != null && !_asked) {
+      _asked = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _focus.requestFocus();
+      });
+    }
+    return FilledButton(
+      focusNode: _focus,
+      onPressed: widget.onPressed,
+      child: const Text('Copy diagnostics'),
+    );
   }
 }
 

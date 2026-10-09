@@ -1,0 +1,52 @@
+# Service units: systemd-analyze verify on the Linux unit and plutil on the macOS plist. Each check needs its own
+# system, so each runs on one. The unit's ExecStart must point at an executable, so the Linux job builds the
+# binary and installs it at /usr/local/bin/holebridge first. Pure Go, so the build runs with cgo off.
+name: Packaging
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  systemd-unit:
+    name: systemd unit (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CGO_ENABLED: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Build and install the binary at the unit's ExecStart
+        run: |
+          go build -o "$RUNNER_TEMP/holebridge" ./cmd/holebridge
+          sudo install -m 0755 "$RUNNER_TEMP/holebridge" /usr/local/bin/holebridge
+      # The unit runs as User=holebridge, so the account must exist for verify. Created unconditionally here
+      # (the runner starts without it) and skipped if it is already there.
+      - name: Create the service user
+        run: |
+          id holebridge >/dev/null 2>&1 || sudo useradd --system --user-group --no-create-home --shell /usr/sbin/nologin holebridge
+      # verify exits non-zero on errors and prints warnings (for example an unknown directive) without failing,
+      # so any output fails the job too.
+      - name: Verify the unit
+        run: |
+          out=$(systemd-analyze verify packaging/systemd/holebridge.service 2>&1) || { echo "$out"; exit 1; }
+          test -z "$out" || { echo "$out"; exit 1; }
+
+  launchd-plist:
+    name: launchd plist (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Lint the plist
+        run: plutil -lint packaging/launchd/holebridge.plist

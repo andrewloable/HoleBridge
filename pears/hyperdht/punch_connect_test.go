@@ -198,6 +198,7 @@ func TestNATSamplesFromDHTPings(t *testing.T) {
 // addresses and punching state, after setupHolepuncher has made the puncher for the admitted handshake.
 func TestServerAnswersPunchingProbeAndPunches(t *testing.T) {
 	tn := startTestnet(t, 10)
+	hideRemoteAddress(t, tn.Nodes[0]) // the server answers with a holepunch, as a server that does not know its address does
 	host := testKeyPair(3)
 	srv := newServer(t, tn.Nodes[0], ServerOptions{})
 	listenOn(t, srv, host)
@@ -231,6 +232,7 @@ func TestServerAnswersPunchingProbeAndPunches(t *testing.T) {
 // server, and each client's probe socket gets a punch from the server's node.
 func TestEachAdmittedHandshakeGetsItsOwnPuncher(t *testing.T) {
 	tn := startTestnet(t, 10)
+	hideRemoteAddress(t, tn.Nodes[0]) // the server answers with a holepunch, as a server that does not know its address does
 	host := testKeyPair(3)
 	srv := newServer(t, tn.Nodes[0], ServerOptions{})
 	listenOn(t, srv, host)

@@ -18,6 +18,7 @@ class HomeScreen extends StatefulWidget {
     this.isTv = false,
     this.onAddFromPhone,
     this.initialLink,
+    this.onOpenSettings,
   });
 
   final AppController controller;
@@ -27,6 +28,9 @@ class HomeScreen extends StatefulWidget {
   final bool isTv;
   final VoidCallback? onAddFromPhone;
   final String? initialLink;
+
+  /// Passed to the add-host screen, which shows the Settings button while the store holds no host.
+  final VoidCallback? onOpenSettings;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -57,6 +61,7 @@ class _HomeScreenState extends State<HomeScreen> {
             isTv: widget.isTv,
             onAddFromPhone: widget.onAddFromPhone,
             initialLink: widget.initialLink,
+            onOpenSettings: widget.onOpenSettings,
           );
         }
         return widget.hostScreenBuilder(context, hosts.first.id);

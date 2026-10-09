@@ -101,7 +101,7 @@
       "title": "LAN port already in use",
       "problem": "a LAN port is already taken",
       "cause": "Another program, or a second host on this machine, is using the port.",
-      "fix": "Stop the other program, or set other lan.port and lan.discoveryPort values in host.json.",
+      "fix": "Stop the other program. A host can use other ports: set lan.port and lan.discoveryPort in its host.json. holebridge share keeps no host.json and always uses the default ports, so it cannot run beside a host or another share on this machine.",
       "where": ["go"]
     },
     {

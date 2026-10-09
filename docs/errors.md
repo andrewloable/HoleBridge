@@ -104,7 +104,7 @@ Generated from spec/errors.json by go generate ./internal/errs. Do not edit by h
 
 **Cause:** Another program, or a second host on this machine, is using the port.
 
-**Fix:** Stop the other program, or set other lan.port and lan.discoveryPort values in host.json.
+**Fix:** Stop the other program. A host can use other ports: set lan.port and lan.discoveryPort in its host.json. holebridge share keeps no host.json and always uses the default ports, so it cannot run beside a host or another share on this machine.
 
 ## HB-LIMIT-REACHED
 

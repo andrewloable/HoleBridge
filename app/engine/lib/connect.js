@@ -4,14 +4,15 @@
 const c = require('compact-encoding')
 const keys = require('./keys.js')
 const protocol = require('./protocol.js')
-const { Session, Budget, Counter } = require('./mux.js')
+const { Session, Budget, Counter, Keep } = require('./mux.js')
 const { relayPolicy } = require('./relay.js')
 const { guardedProtomux } = require('./frame-guard.js')
 
 const PROTOCOL = 'holebridge'
 const VERSION = 1
 // The handshake flags this engine supports. Unordered datagrams: the connection carries them, and the
-// UDP task routes them. Stream resume is not built yet, so FLAG.resume stays off.
+// UDP task routes them. Stream resume is built (lib/mux.js) but not offered yet: FLAG.resume stays off until
+// the Go host interop test covers it.
 const SUPPORTED_FLAGS = protocol.FLAG.datagrams
 // How long a search may take before it gives up (spec/ipc.md: 60 s).
 const LOOKUP_TIMEOUT = 60 * 1000
@@ -20,6 +21,10 @@ const MIB = 1024 * 1024
 // the process (docs/architecture.md, Limits).
 const budget = new Budget(64 * MIB)
 const counter = new Counter(1024)
+// The bytes kept for resending streams after a reattach: 32 MiB in all over the process (docs/architecture.md, Limits).
+const keep = new Keep()
+// muxes maps each HostSession to its mux session, so that adopt(prev) can hand prev's streams over.
+const muxes = new WeakMap()
 
 // hbError makes an error that carries an HB code and the reason, as keys.js does for its errors.
 function hbError(code, reason) {
@@ -62,8 +67,9 @@ const handshake = {
  * handshake does not come in time, and with HB-VERSION-MISMATCH when the host speaks another version.
  *
  * The HostSession has services (the host's handshake list), lan (its lan block, or null), flags (its
- * handshake flags), route ('direct'), open(service) -> Promise<Stream>, destroy(), and emits 'close'
- * once the session ends. The route is always 'direct' here: HyperDHT does not say on the connection
+ * handshake flags), route ('direct'), open(service) -> Promise<Stream>, destroy(), adopt(prev), and the UDP calls
+ * sendFlow, sendDatagram and sendUnordered (lib/udp.js). on(event, fn) takes 'close', 'datagram' (a host
+ * datagram, { flow, payload }) and 'drain' (the ordered channel can take more). The route is always 'direct' here: HyperDHT does not say on the connection
  * whether it was relayed, and the engine has no seam that forces the relayed route (HoleBridge-7vk.5).
  */
 async function connectDirect({ dht, key, appKey, relayKey, flags = SUPPORTED_FLAGS, lookupTimeout = LOOKUP_TIMEOUT }) {
@@ -92,6 +98,13 @@ function openSession(conn, { route, flags = SUPPORTED_FLAGS, lookupTimeout = LOO
   // The guard refuses a control batch inside a control batch before protomux decodes it (lib/frame-guard.js).
   const mux = guardedProtomux(conn)
   const closeListeners = []
+  // The events the UDP layer (lib/udp.js) uses: a datagram from the host, and the ordered channel's drain.
+  const datagramListeners = []
+  const drainListeners = []
+  const eventListeners = { close: closeListeners, datagram: datagramListeners, drain: drainListeners }
+  const emit = (event, arg) => {
+    for (const listener of eventListeners[event]) listener(arg)
+  }
   let pending = null // { resolve, reject } until the host's handshake settles the connect
   let channel = null
   let session = null
@@ -102,12 +115,13 @@ function openSession(conn, { route, flags = SUPPORTED_FLAGS, lookupTimeout = LOO
   })
 
   // close tears the connection down, once. Before the handshake it rejects connectDirect; after it, the
-  // close listeners get the error, if any.
+  // close listeners get the error, if any. The transport is gone, so the mux session detaches: a session with
+  // resume keeps its streams for the grace period, and any other closes them.
   const close = (err) => {
     if (closed) return
     closed = true
     clearTimeout(timer)
-    if (session) session.destroy()
+    if (session) session.detach()
     if (channel) channel.close()
     conn.destroy()
     if (pending) pending.reject(lookupError(err))
@@ -120,6 +134,18 @@ function openSession(conn, { route, flags = SUPPORTED_FLAGS, lookupTimeout = LOO
   )
   conn.on('error', close)
   conn.on('close', () => close())
+  // An unordered datagram from the host, on the DHT route (the LAN route is TCP and has none). A frame that does not
+  // decode is dropped, as UDP drops it.
+  conn.on('message', (buffer) => {
+    if (closed || route === 'lan') return
+    let m = null
+    try {
+      m = c.decode(protocol.unordered, buffer)
+    } catch {
+      return
+    }
+    emit('datagram', m)
+  })
 
   // A message that the session rejects closes the connection, as a protocol break does on the host.
   const messages = protocol.messages.map((encoding, index) => ({
@@ -137,6 +163,7 @@ function openSession(conn, { route, flags = SUPPORTED_FLAGS, lookupTimeout = LOO
     protocol: PROTOCOL,
     handshake,
     messages,
+    ondrain: () => emit('drain'),
     onopen(remote) {
       if (remote.version !== VERSION) {
         close(hbError(
@@ -147,25 +174,62 @@ function openSession(conn, { route, flags = SUPPORTED_FLAGS, lookupTimeout = LOO
       }
       session = new Session({
         role: 'app',
-        send: (index, m) => channel.messages[index].send(m),
+        // A closed connection sends nothing: a detached session may still have a write in flight.
+        send: (index, m) => {
+          if (!closed) channel.messages[index].send(m)
+        },
         budget,
-        counter
+        counter,
+        keep,
+        datagram: (m) => emit('datagram', m)
       })
+      // Resume needs both sides: this side asked for it in its flags, and the host set it in its handshake.
+      if (flags & remote.flags & protocol.FLAG.resume) session.enableResume()
       const { resolve } = pending
       pending = null
       clearTimeout(timer)
-      resolve({
+      const hostSession = {
         services: remote.services,
         lan: remote.lan || null,
         flags: remote.flags,
         route,
         open: (service) => session.open(service),
-        on(event, listener) {
-          if (event !== 'close') throw new Error(`HostSession emits close only, not ${event}`)
-          closeListeners.push(listener)
+        // The UDP flows (lib/udp.js) send through these. Once the session has ended they send nothing, and a
+        // datagram is lost, as on any UDP path.
+        sendFlow({ flow, service, payload }) {
+          if (closed) return
+          channel.messages[9].send({ flow, service, payload })
         },
-        destroy: () => close()
-      })
+        // Returns false, and takes nothing, while the ordered channel is full: the caller waits for 'drain'.
+        sendDatagram({ flow, payload }) {
+          if (closed) return true
+          if (!channel.drained) return false
+          channel.messages[10].send({ flow, payload })
+          return true
+        },
+        sendUnordered({ flow, payload }) {
+          if (closed || route === 'lan') return
+          conn.trySend(c.encode(protocol.unordered, { flow, payload }))
+        },
+        on(event, listener) {
+          if (!Object.hasOwn(eventListeners, event)) {
+            throw new Error(`HostSession emits close, datagram and drain only, not ${event}`)
+          }
+          eventListeners[event].push(listener)
+        },
+        // adopt(prev) takes over the streams that prev, an earlier session of this host, detached (lib/mux.js).
+        // It throws when they cannot move, and the caller then destroys prev.
+        adopt(prev) {
+          session.adopt(muxes.get(prev))
+        },
+        // destroy ends the streams the session holds, even after its transport has gone, and then the transport.
+        destroy() {
+          if (session) session.destroy()
+          close()
+        }
+      }
+      muxes.set(hostSession, session)
+      resolve(hostSession)
     },
     onclose: () => close()
   })

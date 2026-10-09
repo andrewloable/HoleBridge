@@ -17,7 +17,8 @@
 //   streams at once.
 // - Session.adopt(prev) (lib/mux.js): a new session takes over the streams prev detached. Each one is sent
 //   reattach {stream, token, received, limit}, and the new session ignores its data and window until reattached
-//   arrives. The Stream objects stay the same.
+//   arrives. The Stream objects stay the same. If prev is still attached, adopt detaches it first, as the Go
+//   Session.Adopt does.
 // - Sessions (lib/sessions.js) calls newHostSession.adopt(oldHostSession) when a route event hands the host to a new
 //   session, and when a new session comes up within 60 s of a drop. When no new session comes within 60 s, the old
 //   streams close. The 60 s runs on the clock Sessions was given.
@@ -190,11 +191,21 @@ function fakeHost() {
     limit: WINDOW, // the most the app may send in all: the window plus the credit granted
     chunks: [],
     reattaches: [], // the reattach messages it got
+    faults: null, // { silentAt, silence(), dropAt, drop() }: the forced drop of case 1
     reply: null,
     receive(index, m) {
       if (index === 0) {
         host.reply(1, { stream: m.stream, window: WINDOW, token: host.token })
       } else if (index === 3) {
+        if (host.faults && !host.faults.silent && host.received >= host.faults.silentAt) {
+          host.faults.silent = true // from here on its answers are lost: the app's view of what the host took lags behind
+          host.faults.silence()
+        }
+        if (host.faults && !host.faults.dropped && host.received + m.payload.length > host.faults.dropAt) {
+          host.faults.dropped = true // this message is in flight when the link drops, and is lost with it
+          host.faults.drop()
+          return
+        }
         host.chunks.push(copyOf(m.payload))
         host.received += m.payload.length
         host.limit += m.payload.length
@@ -352,6 +363,7 @@ function fakeHostSession({ route = 'direct', lan = null } = {}) {
     },
     budget: new Budget(64 * MIB)
   })
+  mux.enableResume() // the connection does this when the handshake carries FLAG.resume
   let closed = false
   const end = () => {
     if (closed) return
@@ -398,9 +410,11 @@ async function openStream(clock, sessions, service) {
   return opened.value
 }
 
-// Case 1: the app sends 20 MB to the fake host. The connection drops once the host has taken 5 MB, and the app
-// reattaches its stream on a new session. The 20 MB arrives at the host byte-exact, the opened token is nonzero, and
-// the reattach carries the issued token, what the app received (none) and its 2 MiB window.
+// Case 1: the app sends 20 MB to the fake host. The connection drops after the host has taken 5 MB, with one data
+// message in flight and the host's last answers lost, so the app's view of what the host took lags behind. The app
+// reattaches its stream on a new session and must resend from the offset in reattached. The 20 MB arrives at the host
+// byte-exact, the opened token is nonzero, and the reattach carries the issued token, what the app received (none) and
+// its 2 MiB window.
 test('a 20 MB transfer across a forced drop arrives byte-exact', catchThrows(async (t) => {
   const host = fakeHost()
   const first = connection(host)
@@ -411,10 +425,20 @@ test('a 20 MB transfer across a forced drop arrives byte-exact', catchThrows(asy
   t.ok(!b4a.equals(opened.token, b4a.alloc(16)), 'opened carries a nonzero token with resume on')
 
   const want = pattern(20 * MIB)
+  host.faults = {
+    silentAt: 4 * MIB, // after 4 MB the host's answers no longer reach the app ...
+    silence: () => first.down.cut(),
+    dropAt: 5 * MIB, // ... and after 5 MB the link drops, with one message in flight
+    drop: () => {
+      first.cut()
+      first.app.detach()
+    },
+    silent: false,
+    dropped: false
+  }
   const written = watch(writeAll(stream, want))
-  await waitFor(() => host.received >= 5 * MIB, 'the host takes 5 MB')
-  first.cut()
-  first.app.detach()
+  await waitFor(() => host.faults.dropped, 'the link drops after the host takes 5 MB')
+  t.is(host.received, 5 * MIB, 'the host took 5 MB before the drop')
 
   const second = connection(host)
   second.app.enableResume()
@@ -597,4 +621,94 @@ test('a route change hands the open streams to the new session', catchThrows(asy
   await delay(0)
   t.alike(seen.errors, [], 'the stream does not fail across the handover')
   t.is(seen.closed, false, 'and nothing closes it later')
+}))
+
+// Case 9: the app ends its write side, and the close is lost with the link. The reattach sends it again, as the Go host
+// does after a reattach (docs/architecture.md, "Both closes").
+test('a close sent before the drop is sent again after the reattach', catchThrows(async (t) => {
+  const first = appSession()
+  first.session.enableResume()
+  const opening = within(first.session.open('web'), 'open()')
+  first.session.receive(1, { stream: 1, window: WINDOW, token: TOKEN })
+  const stream = await opening
+  watchStream(stream)
+  await within(writeAll(stream, b4a.from('hello')), 'the write')
+  stream.end()
+  await delay(5)
+  t.is(framesOf(first.out.sent, 5).length, 1, 'close went out once on the first session')
+
+  first.out.cut() // the close is lost with the link
+  first.session.detach()
+  const second = appSession()
+  second.session.enableResume()
+  second.session.adopt(first.session)
+  t.is(framesOf(second.out.sent, 5).length, 0, 'no close goes out before reattached')
+  second.session.receive(7, { stream: 1, received: 5, limit: WINDOW })
+  await delay(5)
+  t.is(framesOf(second.out.sent, 5).filter((m) => m.stream === 1).length, 1, 'close for the stream goes out again after reattached')
+  t.is(dataBytes(second.out.sent), 0, 'the host had all 5 bytes, so none are resent')
+}))
+
+// Case 10: the host refuses a reattach with close in place of reattached (a wrong token, or an expired stream). The
+// stream ends with a reset, close goes back, and the stream gives back its slot and its kept bytes. Go counterpart:
+// TestNoReattachWithinGraceClosesTheStream.
+test('a refused reattach ends the stream with a reset', catchThrows(async (t) => {
+  const first = appSession()
+  first.session.enableResume()
+  const opening = within(first.session.open('web'), 'open()')
+  first.session.receive(1, { stream: 1, window: WINDOW, token: TOKEN })
+  const stream = await opening
+  const seen = watchStream(stream)
+  await within(writeAll(stream, pattern(1000)), 'the write')
+  first.out.cut()
+  first.session.detach()
+
+  const second = appSession()
+  second.session.enableResume()
+  second.session.adopt(first.session)
+  t.is(framesOf(second.out.sent, 6).length, 1, 'adopt sent one reattach')
+  second.session.receive(5, { stream: 1 }) // the host refuses: close, and no reattached
+  await delay(5)
+  t.ok(seen.closed, 'the stream closes')
+  t.ok(stream.destroyed, 'and is destroyed')
+  t.is(seen.errors.length, 1, 'it fails once')
+  t.is(seen.errors[0] && seen.errors[0].message, 'stream reset', 'with a reset')
+  t.is(framesOf(second.out.sent, 5).filter((m) => m.stream === 1).length, 1, 'close goes back to the host')
+  t.is(second.session.streams.size, 0, 'the new session holds no stream')
+  t.is(second.session.slots, 0, 'and no slot')
+  second.session.receive(3, { stream: 1, payload: b4a.from('late') }) // a late message for the id is ignored, not a session error
+}))
+
+// Case 11: the host's close reaches a stream whose session is detached. The reader gets what was received, then the
+// end; no close goes out from the app until the local side ends its write side.
+test('a peer close that arrives while the stream stalls ends the read side only', catchThrows(async (t) => {
+  const first = appSession()
+  first.session.enableResume()
+  const opening = within(first.session.open('web'), 'open()')
+  first.session.receive(1, { stream: 1, window: WINDOW, token: TOKEN })
+  const stream = await opening
+  const seen = watchStream(stream)
+  const got = []
+  stream.on('data', (chunk) => got.push(copyOf(chunk)))
+  first.session.receive(3, { stream: 1, payload: b4a.from('abc') })
+  await delay(5)
+  t.is(b4a.concat(got).toString(), 'abc', 'the reader gets the bytes received')
+  first.out.cut()
+  first.session.detach()
+  first.session.receive(5, { stream: 1 }) // the host's close arrives on the detached session
+  await delay(5)
+  t.is(seen.closed, false, 'the stream stays open: its write side is still open')
+  t.is(framesOf(first.out.sent, 5).length, 0, 'no close goes out while the stream stalls')
+
+  const second = appSession()
+  second.session.enableResume()
+  second.session.adopt(first.session)
+  second.session.receive(7, { stream: 1, received: 0, limit: WINDOW })
+  await delay(5)
+  t.is(framesOf(second.out.sent, 5).length, 0, 'no close goes out at the reattach')
+  stream.end()
+  await delay(10)
+  t.is(framesOf(second.out.sent, 5).filter((m) => m.stream === 1).length, 1, 'close goes out when the local side ends')
+  t.ok(seen.closed, 'and the stream completes')
+  t.is(second.session.streams.size, 0, 'the new session holds no stream')
 }))

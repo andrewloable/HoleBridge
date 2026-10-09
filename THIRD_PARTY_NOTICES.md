@@ -678,9 +678,9 @@ NOTICE is in app/licenses/bare-builtins/ and is copied into the Flutter app.
 | teex | 1.0.1 | MIT | Bare Kit and bare runtime |
 | text-decoder | 1.2.7 | Apache-2.0 | Bare Kit and bare runtime |
 
-## Not yet listed
+## Release archives
 
-- Release archives. scripts/collect-licenses.sh writes the Go standard library, Go module and
-  ported-code license texts into a licenses/ directory. The archive build (scripts/release-build.sh,
-  HoleBridge-9co.1) must call it and pack licenses/ into every archive next to LICENSE and
-  THIRD_PARTY_NOTICES.md. Until it does, the archives carry no license texts.
+Each release archive (holebridge_<version>_<os>_<arch>.tar.gz, or .zip on windows) holds the binary,
+LICENSE, this file and licenses/: the Go standard library's LICENSE and PATENTS, the LICENSE,
+PATENTS and NOTICE of each Go module compiled in, and the LICENSE (and NOTICE) of each ported library
+above. scripts/release-build.sh builds the archives and scripts/collect-licenses.sh collects the texts.

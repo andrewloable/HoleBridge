@@ -11,6 +11,8 @@ import (
 	"github.com/andrewloable/HoleBridge/pears/blindrelay"
 	"github.com/andrewloable/HoleBridge/pears/noise"
 	"github.com/andrewloable/HoleBridge/pears/protomux"
+	"github.com/andrewloable/HoleBridge/pears/secretstream"
+	"github.com/andrewloable/HoleBridge/pears/udx"
 )
 
 // relayPairWait bounds how long a test waits for the relay to admit a dial. Upstream dials the relay as soon as
@@ -348,5 +350,106 @@ func TestAcceptedConnRelayedReportsRoute(t *testing.T) {
 			t.Error("Relayed() = true for a stream claimed on the direct path, want false")
 		}
 		exchange(t, c, s.Conn)
+	})
+}
+
+// pairAsResponder runs a responder pairing of d on offer, on a new stream, in the background. The outcome goes to the
+// returned channel, and the stream is destroyed when the test ends.
+func pairAsResponder(t *testing.T, d *DHT, offer relayOffer) <-chan error {
+	t.Helper()
+	st := d.newStream()
+	t.Cleanup(func() { st.Destroy() })
+	out := make(chan error, 1)
+	go func() {
+		_, _, err := d.pairRelay(context.Background(), &streamClaim{}, st, offer, false)
+		out <- err
+	}()
+	return out
+}
+
+// awaitPairing waits for the responder pairing that pairAsResponder started, and fails the test when it did not land.
+func awaitPairing(t *testing.T, out <-chan error) {
+	t.Helper()
+	select {
+	case err := <-out:
+		if err != nil {
+			t.Errorf("the responder's pairing failed: %v", err)
+		}
+	case <-time.After(relayPairWait):
+		t.Fatal("the responder's pairing did not land")
+	}
+}
+
+// streamDown reports whether st has been torn down.
+func streamDown(st *udx.Stream) bool {
+	select {
+	case <-st.Done():
+		return true
+	default:
+		return false
+	}
+}
+
+// Claim of a relay pairing (HoleBridge-85m.5.31): a pairing that takes the stream's claim and then fails in its connect
+// step reports errClaimHeld, and serveRelayed ends the stream; a pairing that loses the claim reports errClaimLost and
+// leaves the stream alone. Connect fails only on a stream that is already torn down, so the stream is torn down before
+// the pairing. Pair needs only the stream's id, so the pairing still lands and takes the claim, and then Connect fails.
+func TestRelayPairingThatTakesClaimThenFailsEndsStream(t *testing.T) {
+	tn := startTestnet(t, 10)
+	relayKP := testKeyPair(7)
+	startRelay(t, tn.Nodes[1], relayKP, nil)
+	initiator, responder := tn.Nodes[8], tn.Nodes[9]
+
+	t.Run("a pairing that takes the claim and then fails reports that it holds the claim", func(t *testing.T) {
+		offer := relayOffer{key: relayKP.Public, token: [32]byte{1}}
+		st := initiator.newStream()
+		st.Destroy()
+		cl := &streamClaim{}
+		out := pairAsResponder(t, responder, offer)
+		_, _, err := initiator.pairRelay(context.Background(), cl, st, offer, true)
+		awaitPairing(t, out)
+		if !errors.Is(err, errClaimHeld) {
+			t.Fatalf("pairRelay that took the claim and then failed returned %v, want errClaimHeld", err)
+		}
+		if cl.take() {
+			t.Error("the claim was free after the pairing took it and failed")
+		}
+		if !streamDown(st) {
+			t.Error("the stream of the failed pairing is not down")
+		}
+	})
+
+	t.Run("serveRelayed ends the stream of a pairing that holds the claim and fails", func(t *testing.T) {
+		offer := relayOffer{key: relayKP.Public, token: [32]byte{2}}
+		srv := newServer(t, initiator, ServerOptions{})
+		st := initiator.newStream()
+		st.Destroy()
+		cl := &streamClaim{}
+		out := pairAsResponder(t, responder, offer)
+		srv.serveRelayed(st, cl, offer, true, secretstream.Keys{})
+		awaitPairing(t, out)
+		if !streamDown(st) {
+			t.Error("serveRelayed left the stream of a pairing that held the claim and failed")
+		}
+		if cl.take() {
+			t.Error("the claim was free after serveRelayed's pairing took it and failed")
+		}
+	})
+
+	t.Run("a pairing that loses the claim leaves the stream alone", func(t *testing.T) {
+		offer := relayOffer{key: relayKP.Public, token: [32]byte{3}}
+		st := initiator.newStream()
+		t.Cleanup(func() { st.Destroy() })
+		cl := &streamClaim{}
+		cl.take() // the direct path claimed the stream first
+		out := pairAsResponder(t, responder, offer)
+		_, _, err := initiator.pairRelay(context.Background(), cl, st, offer, true)
+		awaitPairing(t, out)
+		if !errors.Is(err, errClaimLost) {
+			t.Fatalf("pairRelay that lost the claim returned %v, want errClaimLost", err)
+		}
+		if streamDown(st) {
+			t.Error("a pairing that lost the claim tore the stream down")
+		}
 	})
 }

@@ -163,8 +163,9 @@ the docs where they say anything, and where they are silent, take the minimal op
    service. UDP to a service's address uses that service's flow. UDP to 198.18.0.1:53 is DNS, so the DNS queries
    arrive through UDP ASSOCIATE. The front answers a service name with its address, and forwards other queries to
    the `dnsUpstream` servers, asking each in turn. An empty list forwards nothing, so other names get SERVFAIL, as
-   they do when no upstream answers. 198.18.0.1 is never given to a service. Anything else, including an address
-   no service has, is refused with the SOCKS reply "connection not allowed".
+   they do when no upstream answers. 198.18.0.1 is never given to a service. An address no service has is refused
+   with the SOCKS reply "connection not allowed" (REP 0x02), an address type other than IPv4 with "address type not
+   supported" (0x08), and a command other than CONNECT and UDP ASSOCIATE with "command not supported" (0x07).
    Each `addresses` entry echoes the address Dart sent, with `name` `<service>.<host>.internal`. The host label is
    the host name lowercased, each run of characters other than a to z and 0 to 9 replaced by one dash, with dashes
    trimmed at the ends ([architecture](../docs/architecture.md#vpn-mode-android-and-ios)).

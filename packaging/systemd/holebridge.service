@@ -1,0 +1,56 @@
+# HoleBridge host, started at boot. Enable it as described in docs/install.md.
+#
+# The config directory is /var/lib/holebridge (StateDirectory): owned by the holebridge user, mode 0700, as the
+# host requires. host.json, app.key and the control socket live there. No key is set in this file, on the command
+# line or in the environment.
+#
+# The host prints its banner, which includes the application key, on stdout. StandardOutput=null discards it so
+# the key never reaches the journal. Use "holebridge key" and "holebridge app-key" (docs/install.md) to read the
+# keys. The host's log lines go to the journal.
+
+[Unit]
+Description=HoleBridge host
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=no
+User=holebridge
+Group=holebridge
+ExecStart=/usr/local/bin/holebridge host
+Environment=HOLEBRIDGE_CONFIG=/var/lib/holebridge
+WorkingDirectory=/var/lib/holebridge
+StateDirectory=holebridge
+StateDirectoryMode=0700
+UMask=0077
+StandardOutput=null
+StandardError=journal
+Restart=on-failure
+RestartSec=5
+
+# Hardening. The host needs no privileges: its default ports are 27420 and 27421, above 1024.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+# AF_NETLINK is not in the usual list: Go's net.Interfaces and net.InterfaceAddrs use netlink on Linux to find the
+# LAN addresses (internal/host/wire.go, pears/hyperdht/holepunch.go). Without it the host cannot find its LAN
+# address. AF_UNIX serves the control socket.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

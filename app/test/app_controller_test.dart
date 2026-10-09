@@ -1344,6 +1344,49 @@ void main() {
       expect(await store.relayKey(), _relayTypedNormalized);
     });
 
+    // setRelayKey returns the relay reply's code, so the settings screen shows only a refusal of this save (HoleBridge-5vk.49).
+    test('setRelayKey() returns null when the relay reply is ok, on the key path and on the clear path', () async {
+      final store = HostStore(_MemoryBackend());
+      await store.addHost(name: 'Home', key: _keyA, appKey: _appKeyA);
+      final host = _answeringHost();
+      addTearDown(host.close);
+      final controller = await _started(host, store);
+
+      expect(await controller.setRelayKey(_relayTyped), isNull);
+      expect(await controller.setRelayKey(null), isNull);
+
+      expect(host.requestsOf<RelayRequest>(), hasLength(2));
+      expect(controller.lastErrorCode, isNull);
+    });
+
+    test('setRelayKey() returns the code of a relay reply with ok false, on the key path and on the clear path', () async {
+      final store = HostStore(_MemoryBackend());
+      await store.addHost(name: 'Home', key: _keyA, appKey: _appKeyA);
+      final host = FakeEngineHost();
+      addTearDown(host.close);
+      host.onRequest = (request) =>
+          host.deliver(encode(IpcReply(id: request.id, ok: false, code: 'HB-RELAY-REFUSED')));
+      final controller = await _started(host, store);
+
+      expect(await controller.setRelayKey(_relayTyped), 'HB-RELAY-REFUSED');
+      expect(await controller.setRelayKey(null), 'HB-RELAY-REFUSED');
+
+      expect(host.requestsOf<RelayRequest>(), hasLength(2));
+      expect(controller.lastErrorCode, 'HB-RELAY-REFUSED');
+    });
+
+    test('setRelayKey() returns null and sends nothing when no application key is held', () async {
+      final store = HostStore(_MemoryBackend());
+      final host = _answeringHost();
+      addTearDown(host.close);
+      final controller = await _started(host, store);
+
+      expect(await controller.setRelayKey(_relayTyped), isNull);
+
+      expect(await store.relayKey(), _relayTypedNormalized, reason: 'the key is stored');
+      expect(host.requests, isEmpty, reason: 'the relay request needs an application key');
+    });
+
     test('setRelayKey() while a relay request is in flight sends its own after that one, so the engine ends with the new key', () async {
       final store = HostStore(_MemoryBackend());
       final added = await store.addHost(name: 'Home', key: _keyA, appKey: _appKeyA);
@@ -1558,5 +1601,142 @@ void main() {
 
       expect(host.requestsOf<ConnectRequest>().single.bind, '0.0.0.0', reason: 'the host was closed, so it is connected again');
     });
+
+    test('status() sends one StatusRequest for the host name, and returns the route and NAT view of the status event', () async {
+      final store = HostStore(_MemoryBackend());
+      final added = await store.addHost(name: 'Home', key: _keyA, appKey: _appKeyA);
+      final host = FakeEngineHost();
+      addTearDown(host.close);
+      host.onRequest = (request) {
+        if (request is StatusRequest) host.deliver(encode(_statusEvent(route: 'direct')));
+        host.deliver(encode(IpcReply(id: request.id, ok: true)));
+      };
+      final controller = await _started(host, store);
+
+      final status = await controller.status(added.id);
+
+      expect(host.requestsOf<StatusRequest>().map((r) => r.host), ['Home']);
+      expect(status.route, 'direct');
+      expect(status.nat?.host, '203.0.113.7');
+      expect(status.nat?.port, 4433);
+      expect(status.nat?.firewalled, isFalse);
+      expect(status.nat?.randomized, isTrue);
+    });
+
+    test('status() of a host the engine does not have returns route "" and no NAT view, and throws nothing', () async {
+      final store = HostStore(_MemoryBackend());
+      final added = await store.addHost(name: 'Home', key: _keyA, appKey: _appKeyA);
+      final host = FakeEngineHost();
+      addTearDown(host.close);
+      // The engine answers a status request for a host that is not connected with ok false and HB-USAGE.
+      host.onRequest = (request) => host.deliver(
+        encode(IpcReply(id: request.id, ok: false, code: 'HB-USAGE', detail: 'the host is not connected')),
+      );
+      final controller = await _started(host, store);
+
+      final status = await controller.status(added.id);
+
+      expect(status.route, '');
+      expect(status.nat, isNull);
+      expect(controller.view(added.id).route, '');
+      expect(controller.view(added.id).lastErrorCode, isNull, reason: 'a status query is not an error of the host');
+    });
+
+    test('a status event with no session up sets the route to "" and returns it', () async {
+      final store = HostStore(_MemoryBackend());
+      final added = await store.addHost(name: 'Home', key: _keyA, appKey: _appKeyA);
+      final host = FakeEngineHost();
+      addTearDown(host.close);
+      host.onRequest = (request) {
+        if (request is StatusRequest) host.deliver(encode(_statusEvent(route: '')));
+        host.deliver(encode(IpcReply(id: request.id, ok: true)));
+      };
+      final controller = await _started(host, store);
+      host.deliver(encode(const RouteEvent(host: 'Home', route: 'direct')));
+      await pumpEventQueue();
+      expect(controller.view(added.id).route, 'direct');
+
+      final status = await controller.status(added.id);
+      await pumpEventQueue();
+
+      expect(status.route, '');
+      expect(status.nat?.host, '203.0.113.7', reason: 'the engine sends its NAT view with every status event');
+      expect(controller.view(added.id).route, '', reason: 'the host view agrees with the status');
+    });
+
+    test('status() of an id the store does not have throws StateError and sends nothing', () async {
+      final store = HostStore(_MemoryBackend());
+      final host = _answeringHost();
+      addTearDown(host.close);
+      final controller = await _started(host, store);
+
+      await expectLater(controller.status('no-such-host'), throwsA(isA<StateError>()));
+
+      expect(host.sent, isEmpty);
+    });
+
+    test('status() before start() throws StateError, as connect() does', () async {
+      final store = HostStore(_MemoryBackend());
+      final added = await store.addHost(name: 'Home', key: _keyA, appKey: _appKeyA);
+      final host = _answeringHost();
+      addTearDown(host.close);
+      final controller = AppController(host, store);
+      addTearDown(controller.dispose);
+
+      await expectLater(controller.status(added.id), throwsA(isA<StateError>()));
+
+      expect(host.sent, isEmpty);
+    });
+
+    test('the route of the status event reaches controller.view(id).route', () async {
+      final store = HostStore(_MemoryBackend());
+      final added = await store.addHost(name: 'Home', key: _keyA, appKey: _appKeyA);
+      final host = FakeEngineHost();
+      addTearDown(host.close);
+      host.onRequest = (request) {
+        if (request is StatusRequest) host.deliver(encode(_statusEvent(route: 'lan')));
+        host.deliver(encode(IpcReply(id: request.id, ok: true)));
+      };
+      final controller = await _started(host, store);
+      var notified = false;
+      controller.addListener(() => notified = true);
+
+      await controller.status(added.id);
+      await pumpEventQueue();
+
+      expect(notified, isTrue, reason: 'listeners are told the view changed');
+      expect(controller.view(added.id).route, 'lan');
+    });
+
+    test('a status event that arrives after its reply is still the one status() returns', () async {
+      final store = HostStore(_MemoryBackend());
+      final added = await store.addHost(name: 'Home', key: _keyA, appKey: _appKeyA);
+      final host = FakeEngineHost();
+      addTearDown(host.close);
+      host.onRequest = (request) => host.deliver(encode(IpcReply(id: request.id, ok: true)));
+      final controller = await _started(host, store);
+
+      final pending = controller.status(added.id);
+      // The ok reply has arrived; the status event that carries the answer has not.
+      await pumpEventQueue();
+      host.deliver(encode(_statusEvent(route: 'relay')));
+      final status = await pending;
+
+      expect(status.route, 'relay');
+      expect(status.nat?.host, '203.0.113.7');
+    });
   });
 }
+
+/// A status event for the host 'Home' on [route], with the NAT view the engine reports for every host:
+/// the documentation address 203.0.113.7, port 4433, not firewalled and randomized.
+StatusEvent _statusEvent({required String route}) => StatusEvent(
+  host: 'Home',
+  route: route,
+  sessions: route.isEmpty ? 0 : 1,
+  streams: 0,
+  flows: 0,
+  bytesIn: 0,
+  bytesOut: 0,
+  nat: const NatInfo(host: '203.0.113.7', port: 4433, firewalled: false, randomized: true),
+);

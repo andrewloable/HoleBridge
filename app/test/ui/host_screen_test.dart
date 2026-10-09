@@ -64,6 +64,32 @@ void Function(IpcRequest) _refuse(FakeEngineHost host, String code) {
   };
 }
 
+/// A responder like a reachable engine: close is ok, and connect is ok with the route lan, the services and
+/// the ports bound. A port the connect asked for is the port bound.
+void Function(IpcRequest) _reachable(FakeEngineHost host) {
+  return (request) {
+    if (request is ConnectRequest) {
+      final asked = {for (final port in request.ports) port.service: port.port};
+      host.deliver(
+        encode(
+          IpcReply(
+            id: request.id,
+            ok: true,
+            route: 'lan',
+            services: _services,
+            ports: [
+              for (final port in _ports)
+                PortBinding(service: port.service, port: asked[port.service] ?? port.port),
+            ],
+          ),
+        ),
+      );
+    } else {
+      host.deliver(encode(IpcReply(id: request.id, ok: true)));
+    }
+  };
+}
+
 /// What one test drives: the fake engine, the store with one host, the controller started over the engine,
 /// and the id of the host.
 class _Harness {
@@ -75,11 +101,11 @@ class _Harness {
   final String hostId;
 }
 
-/// Starts a controller over a fake engine with one stored host. The host's cached services are [_services],
-/// so the screen has tiles before any session is up, with no local port bound.
-Future<_Harness> _started() async {
+/// Starts a controller over a fake engine with one stored host, named [name]. The host's cached services are
+/// [_services], so the screen has tiles before any session is up, with no local port bound.
+Future<_Harness> _started({String name = _hostName}) async {
   final store = HostStore(_MemoryBackend());
-  final added = await store.addHost(name: _hostName, key: _keyA, appKey: _appKey);
+  final added = await store.addHost(name: name, key: _keyA, appKey: _appKey);
   await store.saveServices(added.id, [for (final service in _services) service.name]);
   await store.saveServiceKinds(added.id, {
     for (final service in _services) service.name: service.kind,
@@ -273,6 +299,92 @@ void main() {
         isTrue,
         reason: 'the new connect carries the port set by hand',
       );
+    });
+
+    testWidgets(
+      'setting a port by hand on a connected host closes it and connects again with the new port',
+      (tester) async {
+        _tallSurface(tester);
+        final h = await _started();
+        h.host.onRequest = _reachable(h.host);
+        // The connect is answered ok, so the engine has the host registered, as it has once a session is up.
+        await h.controller.connect(h.hostId);
+        await _pumpScreen(tester, h);
+        await tester.pumpAndSettle();
+        final before = h.host.requests.length;
+
+        await tester.longPress(_inTile('ssh', find.text('ssh')));
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(TextField), '2233');
+        await tester.tap(find.text('Save'));
+        await tester.pumpAndSettle();
+
+        expect((await h.store.ports(h.hostId))['ssh'], 2233);
+        final sent = h.host.requests.skip(before).toList();
+        final closeAt = sent.indexWhere((r) => r is CloseRequest && r.host == _hostName);
+        final connectAt = sent.indexWhere((r) => r is ConnectRequest);
+        expect(closeAt, isNonNegative, reason: 'the host is closed first');
+        expect(connectAt, isNonNegative, reason: 'a connect is sent');
+        expect(connectAt, greaterThan(closeAt), reason: 'the connect follows the close');
+        final connect = sent[connectAt] as ConnectRequest;
+        expect(
+          connect.ports.any((port) => port.service == 'ssh' && port.port == 2233),
+          isTrue,
+          reason: 'the new connect carries the port set by hand',
+        );
+        expect(_inTile('ssh', find.textContaining('127.0.0.1:2233')), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      "a lookup that is retried shows Looking for host... and no longer Can't reach host",
+      (tester) async {
+        final h = await _started();
+        h.host.onRequest = _refuse(h.host, 'HB-LOOKUP-TIMEOUT');
+        await h.controller.connect(h.hostId);
+        await _pumpScreen(tester, h);
+        h.host.deliver(encode(const RouteEvent(host: _hostName, route: 'unreachable')));
+        await tester.pumpAndSettle();
+        expect(find.textContaining("Can't reach host"), findsWidgets);
+
+        // The engine retries on its own. The controller keeps the code of the failed lookup through looking.
+        h.host.deliver(encode(const RouteEvent(host: _hostName, route: 'looking')));
+        await tester.pumpAndSettle();
+        expect(h.controller.view(h.hostId).lastErrorCode, 'HB-LOOKUP-TIMEOUT');
+        expect(find.text('Looking for host...'), findsOneWidget);
+        expect(find.textContaining("Can't reach host"), findsNothing);
+        expect(find.textContaining('HB-LOOKUP-TIMEOUT'), findsNothing);
+      },
+    );
+
+    testWidgets('with VPN mode on, the copied name is the host name lowercased with dashes', (
+      tester,
+    ) async {
+      _tallSurface(tester);
+      final h = await _started(name: 'Living Room');
+      await _pumpScreen(tester, h, vpnMode: true);
+      h.host.deliver(encode(ServicesEvent(host: 'Living Room', list: _services, ports: _ports)));
+      await tester.pumpAndSettle();
+
+      String? copied;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (
+        call,
+      ) async {
+        if (call.method == 'Clipboard.setData') {
+          copied = (call.arguments as Map)['text'] as String?;
+        }
+        return null;
+      });
+      addTearDown(
+        () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        ),
+      );
+
+      await tester.tap(_inTile('ssh', find.text('Copy address')));
+      await tester.pumpAndSettle();
+      expect(copied, 'ssh.living-room.internal');
     });
   });
 }

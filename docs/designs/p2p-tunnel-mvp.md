@@ -230,7 +230,7 @@ Success is judged per platform.
 ## Distribution Plan
 
 - **Host and relay:** GitHub Releases archives (linux, darwin, windows x amd64, arm64) carrying the
-  single pure-Go binary (decisions D31, D32); a Docker image; GitHub Actions building on a tag.
+  single pure-Go binary (decisions D31, D32); a Docker image; GitHub Actions building when a release is published.
 - **Android (phone and TV):** Play Store, with signed APKs also on GitHub Releases.
 - **iOS:** TestFlight, then the App Store. An Apple developer account is needed early for the
   Network Extension entitlement.

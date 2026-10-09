@@ -27,8 +27,8 @@ metal. The restart policy brings the host back after a reboot. Host networking b
 Linux; on Docker Desktop for macOS and Windows, run the installed binary instead. The `/config`
 volume holds `host.json` and `app.key`, so keep it across upgrades.
 
-- **Bare-metal installs:** start-at-boot units for systemd, launchd and Windows arrive with M6
-  packaging.
+- **Bare-metal installs:** start at boot with the systemd unit or the launchd LaunchDaemon in
+  `packaging/` ([install.md](install.md)). The Windows service arrives with M6 packaging.
 - **Upgrading:** run the same install command again, or pull the new image. Check the result with
   `holebridge --version`.
 
@@ -52,7 +52,7 @@ them (decisions Q8).
 | `holebridge relay --new-key` | Create `relay.key` in the config directory with mode `0600` (the key as `XXX-XXX-XXX` and a newline), and print the key once. |
 | `holebridge relay` | Run a relay with the key in `relay.key`. |
 | `holebridge relay check <relay-key-file>` | Test a relay from another machine with the same `app.key`: a member is let in, a stranger turned away. |
-| `holebridge status` | M3: what a running host is doing, from its control socket: its services and kinds, its NAT state, whether a relay is set, and its live sessions. Each session is one row with its route (`lan`, `direct` for one over the DHT, or `relay` for one whose stream came through a relay), its open streams and UDP flows, and the bytes it carried in and out. The output holds no key and no target address. |
+| `holebridge status` | M3: what a running host is doing, from its control socket: its services and kinds, its NAT state, whether a relay is set, and its live sessions. Each session is one row with its route (`lan`, `direct` for one over the DHT, or `relay` for one whose stream came through a relay), its open streams and UDP flows, and the bytes it carried in and out. The relay setting is the one the host started with, so a changed relay shows after a restart. The output holds no key and no target address. |
 
 Global options: `--config <dir>`, `--log-level <error|warn|info|debug>`, `--version`, `--help`.
 
@@ -124,7 +124,8 @@ Policy.
 socket and says the change was applied. If the host cannot be asked, the command says to restart it.
 SIGHUP (`kill -HUP <pid>`, the pid in `host.lock`) reloads it too.
 A reload pushes the new service list to the connected apps. A changed key moves the host to the new
-key and closes its sessions.
+key and closes its sessions. The relay key is read when the host starts, so a changed `relay` takes
+a restart.
 
 ## Running a relay
 
@@ -159,6 +160,7 @@ walkthrough is [relay.md](relay.md).
 
 `--config <dir>` or `HOLEBRIDGE_CONFIG` overrides it. Two hosts on one machine use two directories
 and two sets of LAN ports; a port already taken fails with `HB-LAN-PORT-IN-USE` and the fix.
+`holebridge share` keeps no `host.json` and uses the default LAN ports, so it fails the same way beside a running host or another share.
 
 `HOLEBRIDGE_BOOTSTRAP` takes a comma-separated list of `host:port` nodes and replaces the public
 bootstrap nodes that `host`, `share`, `relay` and `relay check` use, as `--bootstrap` does for the
@@ -224,6 +226,8 @@ The app keeps keys and application keys in secure storage.
 
 **Connecting.** The app tries the LAN first, then the internet, and opens a session on demand
 ([sessions](architecture.md#sessions-and-reconnects)).
+Opening a host's screen connects it. Until the session is up, a tcp or udp tile reads
+"Not connected yet" and **Copy address** is off.
 
 ```
 Living room server                                   ● LAN
@@ -242,13 +246,18 @@ Living room server                                   ● LAN
 - **Use the native app**, on every web service, copies the address for the service's own app,
   e.g. Jellyfin's TV app.
 - **Copy address** is for non-web services: point an SSH client, database tool or game at it.
-  For `udp` services it copies the local UDP port. With VPN mode on, it copies the service's name
-  instead (`ssh.living-room.internal`). Services of kind `unknown` also offer
+  For tcp and udp services alike it copies `127.0.0.1:<port>`. With VPN mode on, it copies the
+  service's name instead (`ssh.living-room.internal`). Services of kind `unknown` also offer
   **Try opening**.
 - **Local ports** (without VPN mode). For each service the app tries the service's own port (sent as
   a hint; the target address never is). If that port is taken or not allowed, the operating system
   picks a free one, and the app keeps it per host and service so the address you saved in other apps
-  stays valid. You can set a port by hand.
+  stays valid. You can set a port by hand: long-press the service's tile, or press Select on its
+  name with the TV remote, type a port from 1 to 65535 and Save. The app then connects the host
+  again so the new port is bound.
+
+**Settings** opens from the gear button in the app bar of the add-host screen and of each host's
+screen; the TV remote reaches the button with the D-pad. **Diagnostics** is a row in Settings.
 
 **Settings:**
 

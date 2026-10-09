@@ -328,6 +328,7 @@ func streamHandshake(t *testing.T, relay *net.UDPAddr, host [32]byte, kp noise.K
 // connected on (punchedConn), with the secret stream run over that stream.
 func TestRandomizedClientConnectsThroughBirthdaySocket(t *testing.T) {
 	tn := startTestnet(t, 10)
+	hideRemoteAddress(t, tn.Nodes[0]) // the server answers with a holepunch, as a server that does not know its address does
 	server, client := tn.Nodes[0], tn.Nodes[9]
 	host := testKeyPair(3)
 	kp := testKeyPair(5)

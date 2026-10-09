@@ -501,7 +501,7 @@ uses flows, not streams.
   - The M1 datagram spike confirms which routes carry unordered datagrams, including through the
     relay. Any route that cannot falls back to message 10.
 - **Size.** A datagram larger than `maxDatagram` (default 1144 bytes) is dropped and counted, and the
-  app logs `HB-UDP-TOO-LARGE` once per flow. There is no fragmentation. The default is the 1156-byte
+  app logs `HB-UDP-TOO-LARGE` once per flow (in VPN mode, once per UDP association; see Limits). There is no fragmentation. The default is the 1156-byte
   largest unordered message (measured in M1; see [spike-m1](spike-m1.md#unordered-datagrams)) less the
   frame header that an unordered datagram adds: the `flow` uint and the payload's length prefix. A
   flow id of 2^32 or more takes 9 bytes and a payload of 253 bytes or more takes a 3-byte prefix, so
@@ -514,7 +514,8 @@ uses flows, not streams.
   next datagram from a source opens a fresh flow. Datagrams in flight during the switch are lost,
   as on any UDP path.
 - **Kinds.** `udp` is always explicit (`--kind udp`); the host never probes a UDP target.
-- **In the app,** a `udp` tile shows **Copy address**, which copies the local `127.0.0.1` UDP port.
+- **In the app,** a `udp` tile shows **Copy address**, which copies `127.0.0.1:<port>`, the
+  local UDP address.
 
 ```
  app device                          session                         host
@@ -603,8 +604,9 @@ in `host.json`, tuned during M2:
 | Unauthenticated LAN connections | 32 in total, 4 per source IP | Any device on the network can connect before proving the key; extras are closed at accept, counted, and logged at most once a minute |
 | Pre-proof LAN frame | 65535 bytes | Until its first message decrypts, a LAN connection may send no frame that names more; a longer length prefix closes it at once, counted as a refusal and logged with no key |
 | Receive window per stream | 2 MiB | Throughput on high-latency links (above) |
-| UDP flows | 256 per session, 4096 in total | Each flow holds a host-side socket |
+| UDP flows | 256 per session, 4096 in total | Each flow holds a host-side socket; the app also holds at most 256 per session and drops the datagram of a new source beyond that |
 | UDP flow idle | 60 s, or the service's `idle` | Mirrors common NAT UDP timeouts |
+| VPN front (`lib/vpn-front.js`): control connections | 1024 in total; 256 UDP flows per UDP ASSOCIATE and 4096 in total; 256 DNS queries in flight; 10 s for the greeting and the request; 64 KiB sent before a CONNECT's stream opens | The network stack opens one association per device UDP flow, each with its own relay socket. Past a limit a connection is closed at once, or a datagram is dropped with no reply, and the code is logged once per association (HB-UDP-TOO-LARGE for size, HB-LIMIT-REACHED for the caps) or, for the control cap, once per front, again only after a control connection has closed and at least a minute has passed; and the front writes at most one line per code in each minute, over all its associations. No line holds an address or payload. A DNS query past the in-flight cap, or a datagram that would open a flow past the total cap, is dropped with no reply. A connection that sends more than 64 KiB before its CONNECT's stream opens is closed. A DNS query is held to 2048 bytes and a DNS reply to 1490 bytes instead of `maxDatagram`, since DNS does not ride the tunnel. The UDP layer (udx-native) delivers at most 2048 bytes per datagram, the 10-byte SOCKS header included, so a DNS query over 2038 bytes arrives truncated and is not supported; real queries are far smaller. The network stack reads at most 1500 bytes per datagram from the relay, the 10-byte SOCKS header included, so a DNS reply over 1490 bytes is dropped with no reply and not logged |
 | Max datagram (`maxDatagram`) | 1144 bytes (the 1156-byte unordered message measured in M1, [spike-m1](spike-m1.md#unordered-datagrams), less the 12-byte frame header at the widest flow id) | The largest payload that fits one unordered message after the frame header; larger datagrams are dropped and counted |
 | Largest protocol frame (Protomux, `maxFrame`) | 16777215 bytes (2^24 - 1) | The secret stream writes a frame atomically up to this size, and upstream Protomux splits a batch at 8 MiB so a batch stays under it. A frame over it is refused on send and fails the stream on receive. A batch inside a batch fails the stream on receive too, since upstream never sends one. A data message carries at most 65536 bytes, so its frame is about 65544 bytes |
 | Ordered datagram queue (LAN route) | 256 KiB per session, drop when full | UDP never waits; a stalled channel drops instead |
@@ -903,6 +905,7 @@ target.
   - the cached service list;
   - the local port each service got;
   - certificate pins;
+  - each host's Share with my network setting;
   - the relay key.
 - **Diagnostics (app).** The diagnostics screen shows:
   - the route tried and the NAT type;

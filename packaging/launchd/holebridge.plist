@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  HoleBridge host, started at boot. A LaunchDaemon: install it as described in docs/install.md, as
+  /Library/LaunchDaemons/app.holebridge.host.plist (owner root:wheel, mode 0644).
+
+  The config directory is /var/db/holebridge: owned by the _holebridge user, mode 0700, as the host requires.
+  host.json, app.key and the control socket live there. No key is set in this file, on the command line or in
+  the environment.
+
+  The host prints its banner, which includes the application key, on stdout. StandardOutPath is /dev/null so the
+  key is not written to a log. Use "holebridge key" and "holebridge app-key" (docs/install.md) to read the keys.
+  The host's log lines go to StandardErrorPath.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>app.holebridge.host</string>
+
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/holebridge</string>
+		<string>host</string>
+	</array>
+
+	<key>UserName</key>
+	<string>_holebridge</string>
+	<key>GroupName</key>
+	<string>_holebridge</string>
+
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>HOLEBRIDGE_CONFIG</key>
+		<string>/var/db/holebridge</string>
+	</dict>
+	<key>WorkingDirectory</key>
+	<string>/var/db/holebridge</string>
+
+	<!-- 0077 in decimal: files and the control socket are owner-only. -->
+	<key>Umask</key>
+	<integer>63</integer>
+
+	<key>RunAtLoad</key>
+	<true/>
+	<!-- Restart after any unsuccessful exit (on-failure, as in the systemd unit). -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>ThrottleInterval</key>
+	<integer>10</integer>
+
+	<key>StandardOutPath</key>
+	<string>/dev/null</string>
+	<key>StandardErrorPath</key>
+	<string>/var/log/holebridge.log</string>
+</dict>
+</plist>

@@ -40,13 +40,16 @@ const (
 // target, or nil for a net.Dialer. Clock is the time source, or nil for time.Now. Log receives the host's
 // log lines; they never carry a key, an application key, a derived secret or payload bytes. Kinds gives the
 // kind of a service as the kinds watcher knows it (docs/architecture.md, Service kinds). It is asked only for
-// a service with no kind in host.json, since an explicit kind is never re-probed; nil means unknown.
+// a service with no kind in host.json, since an explicit kind is never re-probed; nil means unknown. Touch is called
+// when a stream to a known service that is not udp opens, before its target is dialed, so that the kinds watcher
+// re-checks a service that is still unknown (docs/architecture.md, Service kinds). It must not block; nil means no call.
 type Options struct {
 	DHT   *hyperdht.DHT
 	Dial  func(ctx context.Context, network, addr string) (net.Conn, error)
 	Clock func() time.Time
 	Log   *slog.Logger
 	Kinds func(service string) protocol.Kind
+	Touch func(service string)
 
 	// Dir is the config directory whose host.json Reload re-reads.
 	Dir string
@@ -93,11 +96,13 @@ type Host struct {
 	dial          func(ctx context.Context, network, addr string) (net.Conn, error)
 	clock         func() time.Time
 	kinds         func(service string) protocol.Kind              // the kinds watcher, or nil
+	touch         func(service string)                            // the kinds watcher's Touch, or nil
 	streamOptions func(secretstream.Options)                      // test hook: the options each DHT session is set up with
 	udpDial       func(network, address string) (net.Conn, error) // test hook: the dialer of each UDP flow, nil for net.Dial
 	limits        config.Limits
 	dir           string           // the config directory Reload re-reads host.json from; empty means none
 	appKey        [32]byte         // the application key Reload derives the key pairs with: a secret, never logged
+	relayServer   *[32]byte        // the relay server's public key when host.json has a relay, else nil: read at start
 	lan           bool             // the LAN route is on: each handshake carries the LAN block
 	lanPort       uint64           // the LAN TCP port, from host.json
 	budget        *mux.Budget      // the receive budget, shared by the process's sessions
@@ -137,17 +142,27 @@ func New(cfg *config.Config, appKey [32]byte, opts Options) (*Host, error) {
 	if err != nil {
 		return nil, err
 	}
+	var relayServer *[32]byte
+	if cfg.Relay != "" {
+		pub, err := RelayServerPublicKey(cfg.Relay, appKey)
+		if err != nil {
+			return nil, err
+		}
+		relayServer = &pub
+	}
 	h := &Host{
 		log:           opts.Log,
 		dht:           opts.DHT,
 		dial:          opts.Dial,
 		clock:         opts.Clock,
 		kinds:         opts.Kinds,
+		touch:         opts.Touch,
 		streamOptions: opts.streamOptions,
 		udpDial:       opts.udpDial,
 		limits:        cfg.Limits,
 		dir:           opts.Dir,
 		appKey:        appKey,
+		relayServer:   relayServer,
 		lan:           cfg.LAN.Enabled == nil || *cfg.LAN.Enabled,
 		lanPort:       uint64(cfg.LAN.Port),
 		names:         names,
@@ -333,7 +348,7 @@ func (h *Host) Run(ctx context.Context) error {
 // it replaces is closed, and so are the sessions, which were admitted under the old key. When listen fails the
 // old server keeps serving. The caller holds lifeMu.
 func (h *Host) listen(ctx context.Context, kp noise.KeyPair, clientPub [32]byte) error {
-	srv := h.dht.CreateServer(hyperdht.ServerOptions{Firewall: h.firewall(clientPub), Keepalive: keepalive})
+	srv := h.dht.CreateServer(h.serverOptions(clientPub))
 	if err := srv.Listen(ctx, kp); err != nil {
 		srv.Close()
 		return err
@@ -348,6 +363,17 @@ func (h *Host) listen(ctx context.Context, kp noise.KeyPair, clientPub [32]byte)
 	h.closeAll()
 	go h.acceptLoop(srv)
 	return nil
+}
+
+// serverOptions returns the options of the server that listens under the host key and admits clientPub. The server has
+// a relayThrough policy only when host.json has a relay (docs/architecture.md, Relay route): the policy offers the relay
+// when a dial is forced or this host's own NAT is randomized, and reads that NAT from the DHT at each call.
+func (h *Host) serverOptions(clientPub [32]byte) hyperdht.ServerOptions {
+	opts := hyperdht.ServerOptions{Firewall: h.firewall(clientPub), Keepalive: keepalive}
+	if h.relayServer != nil {
+		opts.RelayThrough = RelayThrough(h.relayServer, h.dht.NAT)
+	}
+	return opts
 }
 
 // stop ends the listening: the server closes, and so do the sessions. Run calls it when its context is done.
@@ -424,6 +450,9 @@ func (h *Host) accept(name string, m *meter) mux.AcceptResult {
 	}
 	if svc.udp {
 		return mux.AcceptResult{Code: rejectUnknownService, Reason: "udp service: use a flow"}
+	}
+	if h.touch != nil {
+		h.touch(name)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(h.limits.TargetConnectTimeout))
 	defer cancel()

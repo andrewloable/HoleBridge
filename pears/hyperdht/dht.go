@@ -22,11 +22,16 @@ import (
 )
 
 // Config sets up a HyperDHT node. Bootstrap lists the host:port of the bootstrap nodes. DefaultKeyPair
-// is the node's own key pair, or nil for a random one. Port is the UDP port to listen on.
+// is the node's own key pair, or nil for a random one. Port is the UDP port to listen on. Ephemeral keeps the
+// node ephemeral for good, as upstream's ephemeral option does: it has no id, so it answers no LOOKUP,
+// FIND_PEER or ANNOUNCE, and the routes of its servers are held by the other nodes. Its handshakes still
+// reach its servers. The zero value asks for a persistent node, which becomes persistent once NAT sampling
+// allows.
 type Config struct {
 	Bootstrap      []string
 	DefaultKeyPair *noise.KeyPair
 	Port           int
+	Ephemeral      bool
 }
 
 // DHT is a HyperDHT node: a dht-rpc node (pears/dhtrpc) that also stores the signed announce records of
@@ -53,6 +58,10 @@ type DHT struct {
 	// its streams only through a hole punch, never on the direct path or through a relay. Loopback always has a
 	// direct path, so this is how the punch tests make the bytes cross a punched path.
 	forcePunch bool
+
+	// hideAddress is a test seam, set only by tests of this package: the node never names its own address, so a server on
+	// it answers with a holepunch, as a server that does not know its address does (remoteAddress).
+	hideAddress bool
 
 	punch   punchHub    // the live punch handles, which the DHT's holepunch datagrams go to (punch_connect.go)
 	randoms *randomGate // the limit on randomized punches of this DHT (gate)
@@ -142,14 +151,14 @@ const (
 	cmdUnannounce = 5 // UNANNOUNCE: removes a key's record for a target, sent with the token of a LOOKUP
 )
 
-// New starts a HyperDHT node. The node asks for persistence, so it stores records once NAT sampling finds
-// it reachable, as upstream's default node does.
+// New starts a HyperDHT node. Unless cfg.Ephemeral is set, the node asks for persistence, so it stores records
+// once NAT sampling finds it reachable, as upstream's default node does.
 func New(cfg Config) (*DHT, error) {
 	kp, err := keyPair(cfg.DefaultKeyPair)
 	if err != nil {
 		return nil, err
 	}
-	ephemeral := false
+	ephemeral := cfg.Ephemeral
 	n, err := dhtrpc.New(dhtrpc.Config{Bootstrap: cfg.Bootstrap, Port: cfg.Port, Ephemeral: &ephemeral})
 	if err != nil {
 		return nil, err
@@ -196,6 +205,25 @@ func newDHT(n *dhtrpc.Node, kp noise.KeyPair) *DHT {
 // addr returns the UDP address that d listens on.
 func (d *DHT) addr() (*net.UDPAddr, error) {
 	return d.node.Addr()
+}
+
+// remoteAddress returns the address this node knows as its own, as upstream's dht.remoteAddress() does: the host and
+// port that its peers report for it, when that port is the one it listens on and the node is not firewalled. It is nil
+// until the NAT samples name one.
+func (d *DHT) remoteAddress() *net.UDPAddr {
+	if d.hideAddress {
+		return nil
+	}
+	nat := d.node.NAT()
+	bound, err := d.addr()
+	if err != nil || bound == nil || nat.Host == "" || nat.Port == 0 || nat.Firewalled || nat.Port != bound.Port {
+		return nil
+	}
+	ip := net.ParseIP(nat.Host).To4()
+	if ip == nil {
+		return nil
+	}
+	return &net.UDPAddr{IP: ip, Port: nat.Port}
 }
 
 // newStream returns a UDX stream on the node's socket, with a random local id that is not zero, since zero

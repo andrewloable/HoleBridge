@@ -5,11 +5,13 @@
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:holebridge/src/app_controller.dart';
 import 'package:holebridge/src/engine/ipc_codec.dart';
 import 'package:holebridge/src/store/host_store.dart';
 import 'package:holebridge/src/store/secure_backend.dart';
+import 'package:holebridge/src/ui/error_view.dart';
 import 'package:holebridge/src/ui/settings_screen.dart';
 import 'package:holebridge/src/vpn/vpn_mode_control.dart';
 
@@ -35,6 +37,8 @@ const _relayKey = 'PQRSTVWXY';
 const _storedRelayKey = 'ZXVTSRQPN';
 // U is outside the Crockford alphabet, so this typed key does not normalize.
 const _invalidRelayTyped = 'PQR-STV-WXU';
+// The notice a failed VPN mode change shows (lib/src/ui/settings_screen.dart).
+const _vpnFailedNotice = 'VPN mode could not be changed. Try again.';
 
 /// An in-memory SecureBackend, as the one in test/app_controller_test.dart is.
 class _MemoryBackend implements SecureBackend {
@@ -67,6 +71,30 @@ class _FakeVpnMode implements VpnModeControl {
   @override
   Future<void> disable() async {
     enabled = false;
+  }
+}
+
+/// VPN mode whose enable and disable fail with a PlatformException, as the channel does when the consent
+/// screen cannot be opened. It starts as [enabled] says, and counts the calls.
+class _FailingVpnMode implements VpnModeControl {
+  _FailingVpnMode({this.enabled = false});
+
+  @override
+  bool enabled;
+
+  int enableCalls = 0;
+  int disableCalls = 0;
+
+  @override
+  Future<void> enable() async {
+    enableCalls++;
+    throw PlatformException(code: 'CONSENT_UNAVAILABLE');
+  }
+
+  @override
+  Future<void> disable() async {
+    disableCalls++;
+    throw PlatformException(code: 'CONSENT_UNAVAILABLE');
   }
 }
 
@@ -109,6 +137,7 @@ Future<void> _pumpSettings(
   WidgetTester tester,
   _Harness h, {
   VoidCallback? onOpenDiagnostics,
+  VpnModeControl? vpn,
 }) async {
   tester.view.physicalSize = const Size(800, 1600);
   tester.view.devicePixelRatio = 1;
@@ -119,7 +148,7 @@ Future<void> _pumpSettings(
       home: SettingsScreen(
         controller: h.controller,
         store: h.store,
-        vpn: _FakeVpnMode(),
+        vpn: vpn ?? _FakeVpnMode(),
         onOpenDiagnostics: onOpenDiagnostics ?? () {},
       ),
     ),
@@ -302,6 +331,125 @@ void main() {
       await _tap(tester, diagnosticsRowKey);
 
       expect(opened, 1);
+    });
+
+    // Not a TEST CASE of HoleBridge-5vk.13: this comes from the review of HoleBridge-5vk.14 (HoleBridge-5vk.49).
+    testWidgets('a successful relay save shows no error code left by an earlier error', (tester) async {
+      final h = await _started();
+      // A key that does not normalize sets the controller's last error code, without contacting the engine.
+      await h.controller.addTypedKey('xx');
+      expect(h.controller.lastErrorCode, 'HB-KEY-INVALID', reason: 'the earlier error is held');
+      await _pumpSettings(tester, h);
+
+      await tester.enterText(find.byKey(relayKeyFieldKey), _relayTyped);
+      await _tap(tester, relaySaveKey);
+
+      expect(await h.store.relayKey(), _relayKey, reason: 'the key is stored');
+      expect(h.host.requestsOf<RelayRequest>(), hasLength(1), reason: 'the engine answered ok');
+      expect(find.byType(ErrorView), findsNothing, reason: 'a good save shows no error');
+      expect(find.text('HB-KEY-INVALID'), findsNothing);
+    });
+
+    // Not a TEST CASE of HoleBridge-5vk.13: this comes from the review of HoleBridge-5vk.14 (HoleBridge-5vk.49).
+    testWidgets('a relay reply with ok false shows its error code, and the key stays stored', (tester) async {
+      final h = await _started();
+      h.host.onRequest = (request) {
+        final reply = request is RelayRequest
+            ? IpcReply(id: request.id, ok: false, code: 'HB-RELAY-REFUSED')
+            : IpcReply(id: request.id, ok: true);
+        h.host.deliver(encode(reply));
+      };
+      await _pumpSettings(tester, h);
+
+      await tester.enterText(find.byKey(relayKeyFieldKey), _relayTyped);
+      await _tap(tester, relaySaveKey);
+
+      expect(find.text('HB-RELAY-REFUSED'), findsOneWidget, reason: 'the refused reply shows its code');
+      expect(await h.store.relayKey(), _relayKey, reason: 'a refused relay keeps the key stored');
+    });
+
+    // Not a TEST CASE of HoleBridge-5vk.13: this comes from the review of HoleBridge-5vk.14 (HoleBridge-5vk.49).
+    testWidgets('Done on an empty or blank relay field changes nothing: the stored key stays and nothing is sent', (
+      tester,
+    ) async {
+      final h = await _started(relayKey: _storedRelayKey);
+      await _pumpSettings(tester, h);
+
+      await tester.tap(find.byKey(relayKeyFieldKey));
+      await tester.pump();
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+
+      expect(await h.store.relayKey(), _storedRelayKey, reason: 'the stored key is kept');
+      expect(h.host.requests, isEmpty, reason: 'no relay request goes to the engine');
+
+      await tester.enterText(find.byKey(relayKeyFieldKey), '   ');
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+
+      expect(await h.store.relayKey(), _storedRelayKey, reason: 'a blank field keeps the key too');
+      expect(h.host.requests, isEmpty, reason: 'no relay request goes to the engine');
+    });
+
+    // Not a TEST CASE of HoleBridge-5vk.13: this comes from the review of HoleBridge-5vk.14 (HoleBridge-5vk.49).
+    testWidgets('Done on a typed relay key saves it and sends it', (tester) async {
+      final h = await _started();
+      await _pumpSettings(tester, h);
+
+      await tester.enterText(find.byKey(relayKeyFieldKey), _relayTyped);
+      await tester.testTextInput.receiveAction(TextInputAction.done);
+      await tester.pumpAndSettle();
+
+      expect(await h.store.relayKey(), _relayKey, reason: 'the stored key is normalized');
+      final relay = h.host.requestsOf<RelayRequest>().single;
+      expect(relay.key, _relayKey);
+      expect(relay.appKey, _appKey, reason: 'relay carries the held application key');
+    });
+
+    // Not a TEST CASE of HoleBridge-5vk.13: this comes from the review of HoleBridge-5vk.14 (HoleBridge-5vk.50).
+    testWidgets(
+      'a PlatformException from enabling VPN mode shows a notice; the switch stays off and can be tried again',
+      (tester) async {
+        final h = await _started();
+        final vpn = _FailingVpnMode();
+
+        // The override is cleared in a finally block, not in addTearDown (see the VPN visibility test).
+        try {
+          debugDefaultTargetPlatformOverride = TargetPlatform.android;
+          await _pumpSettings(tester, h, vpn: vpn);
+          await _tap(tester, vpnModeSwitchKey);
+
+          expect(tester.takeException(), isNull, reason: 'the failure is handled, not left unhandled');
+          expect(find.text(_vpnFailedNotice), findsOneWidget, reason: 'the notice shows');
+          expect(_switchOn(tester, vpnModeSwitchKey), isFalse, reason: 'VPN mode is still off');
+          expect(vpn.enableCalls, 1);
+
+          await _tap(tester, vpnModeSwitchKey);
+          expect(vpn.enableCalls, 2, reason: 'the switch is still tappable');
+        } finally {
+          debugDefaultTargetPlatformOverride = null;
+        }
+      },
+    );
+
+    // Not a TEST CASE of HoleBridge-5vk.13: this comes from the review of HoleBridge-5vk.14 (HoleBridge-5vk.50).
+    testWidgets('a PlatformException from disabling VPN mode shows a notice; the switch stays on', (tester) async {
+      final h = await _started();
+      final vpn = _FailingVpnMode(enabled: true);
+
+      try {
+        debugDefaultTargetPlatformOverride = TargetPlatform.android;
+        await _pumpSettings(tester, h, vpn: vpn);
+        expect(_switchOn(tester, vpnModeSwitchKey), isTrue, reason: 'VPN mode starts on');
+        await _tap(tester, vpnModeSwitchKey);
+
+        expect(tester.takeException(), isNull, reason: 'the failure is handled, not left unhandled');
+        expect(find.text(_vpnFailedNotice), findsOneWidget, reason: 'the notice shows');
+        expect(_switchOn(tester, vpnModeSwitchKey), isTrue, reason: 'VPN mode is still on');
+        expect(vpn.disableCalls, 1);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
     });
   });
 }

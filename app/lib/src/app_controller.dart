@@ -40,6 +40,17 @@ class ServiceView {
   final int? port;
 }
 
+/// The route and the engine's NAT view for one host, from its status reply (spec/ipc.md, status).
+class HostStatus {
+  const HostStatus({required this.route, required this.nat});
+
+  /// lan, direct, relay, looking or unreachable. Empty when no session is up and no search runs.
+  final String route;
+
+  /// The engine's NAT view, or null when the engine sent none (a host it does not have).
+  final NatInfo? nat;
+}
+
 /// Drives the app engine for the screens. It starts the engine, connects hosts, and applies the
 /// engine's events to each host's view, saving the services cache, the service kinds, the ports and
 /// the LAN addresses and port the engine reports.
@@ -88,7 +99,7 @@ class AppController extends ChangeNotifier {
   bool _relaySent = false;
 
   /// The relay request in flight, or null when none is. Overlapping calls share it (see _ensureRelay).
-  Future<void>? _relayInFlight;
+  Future<IpcReply?>? _relayInFlight;
 
   /// The name of the addTypedKey connect in flight, or null when none runs. The engine names the host by
   /// this name before the host is saved, so its events cannot be mapped to an id yet.
@@ -101,6 +112,10 @@ class AppController extends ChangeNotifier {
   /// The end of the addTypedKey calls queued so far, so that each call runs after the one before it. It
   /// never completes with an error, so a call that failed does not stop the calls after it.
   Future<void> _typedQueue = Future<void>.value();
+
+  /// The end of the setShared calls queued so far, so that each call runs after the one before it. It
+  /// never completes with an error, so a call that failed does not stop the calls after it.
+  Future<void> _shareQueue = Future<void>.value();
 
   String? _lastErrorCode;
 
@@ -184,25 +199,48 @@ class AppController extends ChangeNotifier {
   }
 
   /// Makes sure a session to the host [hostId] is up: sends connect with the host's key, the application
-  /// key it was saved with, its saved LAN addresses and port, its remembered ports, and bind 127.0.0.1.
-  /// A host the engine already has registered is not sent again. The request waits 75 s, longer than
-  /// the engine's 60 s lookup, so the engine's own reply comes first.
+  /// key it was saved with, its saved LAN addresses and port, its remembered ports, and bind 127.0.0.1
+  /// (0.0.0.0 when Share with my network is on for the host).
+  /// A host the engine already has registered is not sent again, so a port or bind changed since then
+  /// reaches the engine only through reconnect. The request waits 75 s, longer than the engine's 60 s
+  /// lookup, so the engine's own reply comes first.
   Future<void> connect(String hostId) {
     final running = _connecting[hostId];
     if (running != null) return running;
-    final attempt = _connect(hostId);
-    _connecting[hostId] = attempt;
-    return attempt.whenComplete(() {
-      _connecting.remove(hostId);
-    });
+    return _track(hostId, _connect(hostId));
   }
 
   /// Closes the host in the engine, then connects it again with the settings the store holds now
   /// (remembered ports, saved LAN addresses, bind). connect() sends nothing for a host the engine
   /// already has, so this is how a changed port or bind reaches the engine. Closes under the name the
-  /// store holds now (a rename is not handled here).
-  Future<void> reconnect(String hostId) {
-    throw UnimplementedError();
+  /// store holds now (a rename is not handled here). It waits for the connect or reconnect in flight
+  /// for the host, and a connect() made meanwhile waits for this one. An unknown id throws StateError
+  /// and sends nothing.
+  Future<void> reconnect(String hostId) => _track(hostId, _reconnect(hostId, _connecting[hostId]));
+
+  /// Asks the engine for the route and the engine's NAT view of the host [hostId] (spec/ipc.md, status).
+  /// The status event that answers the request carries both, and it is taken whether it arrives before
+  /// the reply or after it. A reply with ok false (HB-USAGE: the engine does not have the host connected)
+  /// gives route "" and no NAT view. It sets no error on the host, because a status query for a host that
+  /// is not connected is not a failure of the host. An id the store does not have throws StateError and
+  /// sends nothing, and so does a call before start, as connect does. Engine failures are not caught here.
+  Future<HostStatus> status(String hostId) async {
+    final host = await _loadHost(hostId);
+    final client = _client;
+    if (client == null) throw StateError('start() has not run');
+    // Listens before the request is sent, so the event cannot pass by unheard.
+    final answer = Completer<StatusEvent>();
+    final listener = client.events.listen((event) {
+      if (event is StatusEvent && event.host == host.name && !answer.isCompleted) answer.complete(event);
+    });
+    try {
+      final reply = await _send(StatusRequest(host: host.name));
+      if (!reply.ok) return const HostStatus(route: '', nat: null);
+      final event = await answer.future.timeout(_requestTimeout);
+      return HostStatus(route: event.route, nat: event.nat);
+    } finally {
+      await listener.cancel();
+    }
   }
 
   /// What the screens show for the host [hostId]. An id the controller does not know has an empty view.
@@ -248,7 +286,36 @@ class AppController extends ChangeNotifier {
   /// Throws KeyFormatException, storing and sending nothing, when the text is not blank and does not
   /// normalize. A relay request that fails is not caught here, as in connect: the key stays stored, and
   /// the next connect sends it. A reply with ok false sets [lastErrorCode], as start() does.
-  Future<void> setRelayKey(String? typed) => throw UnimplementedError();
+  ///
+  /// Returns the code of the relay reply when that reply has ok false, so the caller can show this save's
+  /// refusal. Returns null in every other case: the reply is ok, or no relay request was sent because no
+  /// application key is held. It does not return the older [lastErrorCode].
+  Future<String?> setRelayKey(String? typed) async {
+    final key = (typed == null || typed.trim().isEmpty) ? null : normalizeKey(typed);
+    await _store.saveRelayKey(key);
+    // A relay request in flight carries the old key. Let it finish, so the new one goes after it.
+    final running = _relayInFlight;
+    if (running != null) {
+      try {
+        await running;
+      } catch (_) {
+        // Its failure is not this call's. The request below is sent anyway.
+      }
+    }
+    if (key == null) {
+      final reply = await _send(RelayRequest(key: '', appKey: Uint8List(32)));
+      _relaySent = true;
+      if (!reply.ok) {
+        _lastErrorCode = reply.code;
+        notifyListeners();
+        return reply.code;
+      }
+      return null;
+    }
+    _relaySent = false;
+    final reply = await _ensureRelay();
+    return reply != null && !reply.ok ? reply.code : null;
+  }
 
   /// Turns Share with my network on or off for the host [hostId] (docs/cli.md#the-app). The setting is
   /// stored with HostStore.saveShared and applies to every later connect: bind 0.0.0.0 when it is on, and
@@ -260,7 +327,29 @@ class AppController extends ChangeNotifier {
   /// not registered is not connected: only the setting changes. Calls run one at a time, in the order
   /// they were made, so the last call decides the bind. Throws StateError, sending nothing, for a host
   /// the store does not have. Engine failures are not caught here, as in connect.
-  Future<void> setShared(String hostId, bool shared) => throw UnimplementedError();
+  Future<void> setShared(String hostId, bool shared) {
+    final run = _shareQueue.then((_) => _setShared(hostId, shared));
+    _shareQueue = run.then<void>((_) {}, onError: (Object _) {});
+    return run;
+  }
+
+  Future<void> _setShared(String hostId, bool shared) async {
+    await _store.saveShared(hostId, shared);
+    // A connect in progress read the old setting. Let it finish, so the reconnect below replaces it.
+    final connecting = _connecting[hostId];
+    if (connecting != null) {
+      try {
+        await connecting;
+      } catch (_) {
+        // Its failure belongs to whoever called connect.
+      }
+    }
+    if (!_registered.contains(hostId)) return;
+    final host = await _loadHost(hostId);
+    await _send(CloseRequest(host: host.name));
+    _registered.remove(hostId);
+    await connect(hostId);
+  }
 
   Future<String?> _addTypedKey(String typed) async {
     final appKeys = await _store.appKeys();
@@ -324,22 +413,57 @@ class AppController extends ChangeNotifier {
     await _ensureRelay();
     if (_registered.contains(hostId)) return;
     final host = await _loadHost(hostId);
+    _applyConnectReply(hostId, await _sendConnect(host));
+  }
+
+  /// One reconnect, for reconnect. It waits for [pending], the connect or reconnect in flight for the host,
+  /// and ignores how it ends. Then it closes the host (the engine replies ok even for a host it does not
+  /// have, so the close always goes out) and connects it again with the store as it is now.
+  Future<void> _reconnect(String hostId, Future<void>? pending) async {
+    if (pending != null) {
+      try {
+        await pending;
+      } catch (_) {
+        // Only the end of the pending attempt matters here, not how it ended.
+      }
+    }
+    final host = await _loadHost(hostId);
+    await _send(CloseRequest(host: host.name));
+    _registered.remove(hostId);
+    // The relay goes first, as in connect. After an engine restart the engine has no relay, so this sends it.
+    await _ensureRelay();
+    _applyConnectReply(hostId, await _sendConnect(host));
+  }
+
+  /// Builds the connect request for [host] from the store as it is now (the application key it was saved
+  /// with, its saved LAN addresses and port, its remembered ports, and the bind) and sends it. connect and
+  /// reconnect both send through here, so a setting the request gains later reaches both.
+  Future<IpcReply> _sendConnect(Host host) async {
     final appKeys = await _store.appKeys();
-    final addresses = await _store.lanAddresses(hostId);
-    final lanPort = await _store.lanPort(hostId);
-    final ports = await _store.ports(hostId);
-    final reply = await _send(
+    final addresses = await _store.lanAddresses(host.id);
+    final lanPort = await _store.lanPort(host.id);
+    final ports = await _store.ports(host.id);
+    final shared = await _store.shared(host.id);
+    return _send(
       ConnectRequest(
         host: host.name,
         key: host.key,
         appKey: appKeys[host.appKeyIndex],
         lan: LanAddresses(addresses: addresses, port: lanPort),
         ports: [for (final entry in ports.entries) PortBinding(service: entry.key, port: entry.value)],
-        bind: _loopback,
+        bind: shared ? _allInterfaces : _loopback,
       ),
       timeout: _connectTimeout,
     );
-    _applyConnectReply(hostId, reply);
+  }
+
+  /// Records [attempt] as the work in progress for [hostId] until it completes, and returns it. A reconnect
+  /// that starts meanwhile takes over the entry, so the earlier attempt must not remove it on completion.
+  Future<void> _track(String hostId, Future<void> attempt) {
+    _connecting[hostId] = attempt;
+    return attempt.whenComplete(() {
+      if (identical(_connecting[hostId], attempt)) _connecting.remove(hostId);
+    });
   }
 
   /// Applies a connect reply to the host's view. An ok reply sets the route, services and ports, as the
@@ -366,8 +490,8 @@ class AppController extends ChangeNotifier {
   /// relay key or no application key is held. Connect and addTypedKey call it before their first dial, so
   /// the relay key is in place before any host is dialled. A call that overlaps a request in flight waits
   /// for that request instead of sending its own. A request that fails leaves the relay unsent, so the
-  /// next call tries again.
-  Future<void> _ensureRelay() {
+  /// next call tries again. It completes with the relay reply, or with null when it sent nothing.
+  Future<IpcReply?> _ensureRelay() {
     final running = _relayInFlight;
     if (running != null) return running;
     final attempt = _sendRelay().whenComplete(() {
@@ -377,17 +501,21 @@ class AppController extends ChangeNotifier {
     return attempt;
   }
 
-  Future<void> _sendRelay() async {
-    if (_relaySent) return;
+  /// Sends the relay request unless one was sent since the engine started, and completes with its reply.
+  /// It completes with null when it sends nothing (no relay key or no application key is held, or the
+  /// relay was sent already).
+  Future<IpcReply?> _sendRelay() async {
+    if (_relaySent) return null;
     final relayKey = await _store.relayKey();
     final appKeys = await _store.appKeys();
-    if (relayKey == null || appKeys.isEmpty) return;
+    if (relayKey == null || appKeys.isEmpty) return null;
     final reply = await _send(RelayRequest(key: relayKey, appKey: appKeys.first));
     _relaySent = true;
     if (!reply.ok) {
       _lastErrorCode = reply.code;
       notifyListeners();
     }
+    return reply;
   }
 
   /// Sends a request through the client and waits for its reply. The client's failures are not caught.
@@ -442,6 +570,13 @@ class AppController extends ChangeNotifier {
 
   _ViewState _viewOf(String hostId) => _views.putIfAbsent(hostId, _ViewState.new);
 
+  /// Sets the route of the host [id] from a route or status event. A live route clears the host's error.
+  void _setRoute(String id, String route) {
+    final view = _viewOf(id);
+    view.route = route;
+    if (route == 'lan' || route == 'direct' || route == 'relay') view.lastErrorCode = null;
+  }
+
   /// Sets the services of a host from a services list (a services event, or a connect reply that is
   /// ok), and saves them: the names and kinds as the cache, and each bound port.
   void _applyServices(String hostId, List<ServiceEntry> list, List<PortBinding> ports) {
@@ -470,11 +605,13 @@ class AppController extends ChangeNotifier {
     switch (event) {
       case RouteEvent(:final host, :final route):
         final id = _idOf(host);
-        if (id != null) {
-          final view = _viewOf(id);
-          view.route = route;
-          if (route == 'lan' || route == 'direct' || route == 'relay') view.lastErrorCode = null;
-        }
+        if (id != null) _setRoute(id, route);
+        break;
+      case StatusEvent(:final host, :final route):
+        // The status event carries the route as a route event does, so the screens agree. status() takes the
+        // NAT view from the same event.
+        final id = _idOf(host);
+        if (id != null) _setRoute(id, route);
         break;
       case SessionEvent(:final host, :final up):
         // A session that goes down leaves no route: no session is up and no search runs, until the
@@ -573,9 +710,12 @@ const _requestTimeout = Duration(seconds: 60);
 /// arrives before the client's own timeout.
 const _connectTimeout = Duration(seconds: 75);
 
-/// The bind address of every connect. Share with my network (0.0.0.0) has no stored setting yet (tasks
-/// 5vk.13 and 5vk.14), so every host stays on loopback (spec/ipc.md, connect).
+/// The bind address of a connect when Share with my network is off, which is the default
+/// (spec/ipc.md, connect). addTypedKey always uses it: a host that is not saved yet has no setting.
 const _loopback = '127.0.0.1';
+
+/// The bind address of a connect when Share with my network is on for the host (spec/ipc.md, connect).
+const _allInterfaces = '0.0.0.0';
 
 /// The code of a connect whose search found no host in 60 s.
 const _lookupTimeout = 'HB-LOOKUP-TIMEOUT';

@@ -77,6 +77,7 @@ func TestRandomPunchGateLimitsAndSpacesRandomizedPunches(t *testing.T) {
 // punch is sent to the client. A handshake with no relay gets the same error as an abort (upstream _abort).
 func TestServerAnswersTryLaterWhileRandomPunchesRun(t *testing.T) {
 	tn := startTestnet(t, 10)
+	hideRemoteAddress(t, tn.Nodes[0]) // the server answers with a holepunch, as a server that does not know its address does
 	host := testKeyPair(3)
 	relayPub := testKeyPair(9).Public
 	srv := newServer(t, tn.Nodes[0], ServerOptions{RelayThrough: always(relayPub)})
@@ -117,6 +118,7 @@ func TestServerAnswersTryLaterWhileRandomPunchesRun(t *testing.T) {
 		t.Errorf("answer during the 20 s interval has error %d, want TRY_LATER (%d)", reply.Error, holepunchTryLater)
 	}
 
+	hideRemoteAddress(t, tn.Nodes[1])
 	noRelay := newServer(t, tn.Nodes[1], ServerOptions{})
 	other := testKeyPair(4)
 	listenOn(t, noRelay, other)
@@ -140,6 +142,7 @@ func TestServerAnswersTryLaterWhileRandomPunchesRun(t *testing.T) {
 // (upstream _onpeerholepunch: "Fast mode"). The client here is a DHT node, so its punch handler sees the datagram.
 func TestFastOpenPunchesBackOnProbeNamingOurAddress(t *testing.T) {
 	tn := startTestnet(t, 10)
+	hideRemoteAddress(t, tn.Nodes[0]) // the server answers with a holepunch, as a server that does not know its address does
 	host := testKeyPair(3)
 	srv := newServer(t, tn.Nodes[0], ServerOptions{})
 	listenOn(t, srv, host)
@@ -177,6 +180,7 @@ func TestFastOpenPunchesBackOnProbeNamingOurAddress(t *testing.T) {
 // puncher from the relay (upstream _onpeerholepunch: p.nat.add(req.to, req.from)). The sample counts once per relay.
 func TestRelayedProbeAddsNATSample(t *testing.T) {
 	tn := startTestnet(t, 10)
+	hideRemoteAddress(t, tn.Nodes[0]) // the server answers with a holepunch, as a server that does not know its address does
 	host := testKeyPair(3)
 	srv := newServer(t, tn.Nodes[0], ServerOptions{})
 	listenOn(t, srv, host)
@@ -205,6 +209,7 @@ func TestRelayedProbeAddsNATSample(t *testing.T) {
 // again, and after the gate frees, the punch starts (upstream roundPunch: tryLater, then roundPunch again).
 func TestClientWaitsOutTryLaterThenPunches(t *testing.T) {
 	tn := startTestnet(t, 10)
+	hideRemoteAddress(t, tn.Nodes[0]) // the server answers with a holepunch, as a server that does not know its address does
 	host := testKeyPair(3)
 	relayPub := testKeyPair(9).Public
 	srv := newServer(t, tn.Nodes[0], ServerOptions{RelayThrough: always(relayPub)})

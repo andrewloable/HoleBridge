@@ -389,6 +389,45 @@ func TestOpenEchoesMegabyte(t *testing.T) {
 	}
 }
 
+// Touch is called once when a stream to a known service opens, and not for a name the configuration does not
+// have, nor for a udp service, which opens flows and not streams.
+func TestTouchCalledOnlyForKnownStreamServices(t *testing.T) {
+	r := newRig(t)
+	var mu sync.Mutex
+	var touched []string
+	cfg := r.hostConfig(t, map[string]config.Service{
+		"echo": {Target: echoTarget(t), Kind: "tcp"},
+		"dns":  {Target: closedAddr(t), Kind: "udp"},
+	}, nil)
+	r.runWire(t, r.newWireHost(t, cfg, func(o *Options) {
+		o.Touch = func(service string) {
+			mu.Lock()
+			defer mu.Unlock()
+			touched = append(touched, service)
+		}
+	}))
+	c := r.connect(t, r.clientKey)
+
+	st, err := c.Open("echo")
+	failIfStub(t, err)
+	if err != nil {
+		t.Fatalf("Open echo: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	if _, err := c.Open("missing"); rejectOf(t, err).Code != 1 {
+		t.Errorf("open of an unknown name: want reject code 1")
+	}
+	if _, err := c.Open("dns"); rejectOf(t, err).Code != 1 {
+		t.Errorf("open of a udp service as a stream: want reject code 1")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if got := strings.Join(touched, ","); got != "echo" {
+		t.Fatalf("Touch was called for %q, want exactly echo, once", got)
+	}
+}
+
 // Case 4: a service the configuration does not name is refused with reject code 1.
 func TestUnknownServiceRejectedWithCode1(t *testing.T) {
 	r := newRig(t)

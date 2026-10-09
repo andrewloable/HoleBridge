@@ -8,9 +8,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -28,6 +31,7 @@ import (
 	"github.com/andrewloable/HoleBridge/internal/keys"
 	"github.com/andrewloable/HoleBridge/internal/lan"
 	"github.com/andrewloable/HoleBridge/internal/links"
+	"github.com/andrewloable/HoleBridge/internal/protocol"
 	"github.com/andrewloable/HoleBridge/internal/status"
 	"github.com/andrewloable/HoleBridge/pears/dhtrpc"
 	"github.com/andrewloable/HoleBridge/pears/hyperdht"
@@ -86,6 +90,10 @@ func waitForControl(t *testing.T, dir string, done <-chan hostDone) status.Statu
 	}
 }
 
+// lanOffHostJSON is a host.json with the LAN route off. A test that starts a host but never probes its LAN route writes
+// it, so that the host binds no LAN port: the defaults, UDP 27420 and TCP 27421, may be held by another host or test run.
+const lanOffHostJSON = `{"lan":{"enabled":false}}`
+
 // hasService reports whether st lists a service with this name and kind.
 func hasService(st status.Status, name, kind string) bool {
 	for _, s := range st.Services {
@@ -103,6 +111,7 @@ func TestHostServesControlSocketAndReloadsOnServiceAdd(t *testing.T) {
 	tn := hyperdht.NewTestnet(t, testnetSize)
 	useTestnet(t, tn)
 	dir := shortDir(t)
+	writeHostJSON(t, dir, lanOffHostJSON)
 
 	done, stop := startHost(t, dir)
 	st := waitForControl(t, dir, done)
@@ -175,6 +184,7 @@ func TestHostReloadsOnSIGHUP(t *testing.T) {
 	tn := hyperdht.NewTestnet(t, testnetSize)
 	useTestnet(t, tn)
 	dir := shortDir(t)
+	writeHostJSON(t, dir, lanOffHostJSON)
 
 	done, stop := startHost(t, dir)
 	waitForControl(t, dir, done)
@@ -332,12 +342,13 @@ func TestStatusListsLiveSession(t *testing.T) {
 	useTestnet(t, tn)
 	dir := shortDir(t)
 	target := echoListener(t)
-	// host.json names the key and the service only. Defaults (the limits in particular) come from config.Load, as
+	// host.json names the key, the service and LAN off only. Defaults (the limits in particular) come from config.Load, as
 	// they do for a host the command starts; a config built as a literal would carry zero limits and refuse every
 	// session.
 	doc, err := json.Marshal(map[string]any{
 		"key":      keys.Format(keys.Generate()),
 		"services": map[string]config.Service{"echo": {Target: target, Kind: "tcp"}},
+		"lan":      map[string]any{"enabled": false},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -757,7 +768,8 @@ func TestHostExitsOneWhenLANPortIsInUse(t *testing.T) {
 	t.Cleanup(func() { occupant.Close() })
 	port := occupant.Addr().(*net.TCPAddr).Port
 	dir := shortDir(t)
-	writeHostJSON(t, dir, `{"key":"7KQ-M4X-9TR","lan":{"port":`+strconv.Itoa(port)+`}}`)
+	// The discovery port is picked too, so that the host never binds the default UDP 27420 that another run may hold.
+	writeHostJSON(t, dir, `{"key":"7KQ-M4X-9TR","lan":{"discoveryPort":`+strconv.Itoa(freeUDPPort(t))+`,"port":`+strconv.Itoa(port)+`}}`)
 	_, appKey, _ := vectors(t)
 	writeAppKey(t, dir, appKey)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -983,7 +995,8 @@ func TestHostRemovesLockWhenTheRunnerFailsToStart(t *testing.T) {
 	}
 }
 
-// freeTCPPort returns a TCP port on 127.0.0.1 that nothing holds at the time of the call.
+// freeTCPPort returns a TCP port on 127.0.0.1 that nothing holds at the time of the call. The port is free only until
+// the probe closes: a host that binds it later may find another program on it. startLANHost retries for that reason.
 func freeTCPPort(t *testing.T) int {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -994,7 +1007,7 @@ func freeTCPPort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-// freeUDPPort returns a UDP port on 127.0.0.1 that nothing holds at the time of the call.
+// freeUDPPort returns a UDP port on 127.0.0.1 that nothing holds at the time of the call. See freeTCPPort.
 func freeUDPPort(t *testing.T) int {
 	t.Helper()
 	c, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -1003,6 +1016,52 @@ func freeUDPPort(t *testing.T) int {
 	}
 	defer c.Close()
 	return c.LocalAddr().(*net.UDPAddr).Port
+}
+
+// lanStartAttempts is how many times startLANHost picks ports for a host before it gives up.
+const lanStartAttempts = 5
+
+// startLANHost writes host.json in dir with a free UDP discovery port and a free TCP port, and starts the host. format is
+// the host.json body, with %[1]d for the UDP port and %[2]d for the TCP port. The probes close their sockets before the
+// host binds the ports, so another program can take one of them in between. The host then exits with HB-LAN-PORT-IN-USE
+// before its control socket answers, and startLANHost picks new ports and starts the host again. It returns once the
+// control socket answers, with the two ports and the channel and cancel that startHost returns.
+func startLANHost(t *testing.T, dir, format string) (udpPort, tcpPort int, done <-chan hostDone, stop context.CancelFunc) {
+	t.Helper()
+	for attempt := 1; ; attempt++ {
+		udpPort, tcpPort = freeUDPPort(t), freeTCPPort(t)
+		writeHostJSON(t, dir, fmt.Sprintf(format, udpPort, tcpPort))
+		done, stop = startHost(t, dir)
+		exit := waitForControlOrExit(t, dir, done)
+		if exit == nil {
+			return udpPort, tcpPort, done, stop
+		}
+		stop()
+		if attempt == lanStartAttempts || !strings.Contains(exit.stderr, "HB-LAN-PORT-IN-USE") {
+			t.Fatalf("host exited before it answered: exit code %d, stderr %q", exit.code, exit.stderr)
+		}
+	}
+}
+
+// waitForControlOrExit polls the control socket of dir until it answers, as waitForControl does, and returns nil. When the
+// host exits first, it returns the host's result instead.
+func waitForControlOrExit(t *testing.T, dir string, done <-chan hostDone) *hostDone {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		select {
+		case d := <-done:
+			return &d
+		default:
+		}
+		if _, err := status.Query(dir, "status"); err == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no status answer from the control socket")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 // probeLAN sends one signed probe under lanKey to the discovery port and returns the TCP port the reply names, and
@@ -1035,9 +1094,7 @@ func probeLAN(t *testing.T, udpPort int, lanKey [32]byte) (uint16, bool) {
 func TestHostLANRouteAnswersProbeAndListens(t *testing.T) {
 	tn := hyperdht.NewTestnet(t, testnetSize)
 	useTestnet(t, tn)
-	udpPort, tcpPort := freeUDPPort(t), freeTCPPort(t)
 	dir := shortDir(t)
-	writeHostJSON(t, dir, `{"key":"7KQ-M4X-9TR","lan":{"discoveryPort":`+strconv.Itoa(udpPort)+`,"port":`+strconv.Itoa(tcpPort)+`}}`)
 	_, appKey, _ := vectors(t)
 	writeAppKey(t, dir, appKey)
 	d, err := keys.Derive("7KQM4X9TR", appKey)
@@ -1045,8 +1102,7 @@ func TestHostLANRouteAnswersProbeAndListens(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	done, stop := startHost(t, dir)
-	waitForControl(t, dir, done)
+	udpPort, tcpPort, _, stop := startLANHost(t, dir, `{"key":"7KQ-M4X-9TR","lan":{"discoveryPort":%[1]d,"port":%[2]d}}`)
 	defer stop()
 
 	port, ok := probeLAN(t, udpPort, d.LAN.Reveal())
@@ -1074,9 +1130,7 @@ func TestHostLANFollowsAChangedKeyOnReload(t *testing.T) {
 	}
 	tn := hyperdht.NewTestnet(t, testnetSize)
 	useTestnet(t, tn)
-	udpPort, tcpPort := freeUDPPort(t), freeTCPPort(t)
 	dir := shortDir(t)
-	writeHostJSON(t, dir, `{"key":"7KQ-M4X-9TR","lan":{"discoveryPort":`+strconv.Itoa(udpPort)+`,"port":`+strconv.Itoa(tcpPort)+`}}`)
 	_, appKey, _ := vectors(t)
 	writeAppKey(t, dir, appKey)
 	oldDerived, err := keys.Derive("7KQM4X9TR", appKey)
@@ -1085,8 +1139,7 @@ func TestHostLANFollowsAChangedKeyOnReload(t *testing.T) {
 	}
 	oldLANKey := oldDerived.LAN.Reveal()
 
-	done, stop := startHost(t, dir)
-	waitForControl(t, dir, done)
+	udpPort, _, _, stop := startLANHost(t, dir, `{"key":"7KQ-M4X-9TR","lan":{"discoveryPort":%[1]d,"port":%[2]d}}`)
 	defer stop()
 	if _, ok := probeLAN(t, udpPort, oldLANKey); !ok {
 		t.Fatal("the LAN route does not answer under the host's first key")
@@ -1136,9 +1189,7 @@ func TestHostReloadKeepsLANSessionWhenKeyIsUnchanged(t *testing.T) {
 	}
 	tn := hyperdht.NewTestnet(t, testnetSize)
 	useTestnet(t, tn)
-	udpPort, tcpPort := freeUDPPort(t), freeTCPPort(t)
 	dir := shortDir(t)
-	writeHostJSON(t, dir, `{"key":"7KQ-M4X-9TR","services":{"echo":{"target":"127.0.0.1:9","kind":"tcp"}},"lan":{"discoveryPort":`+strconv.Itoa(udpPort)+`,"port":`+strconv.Itoa(tcpPort)+`}}`)
 	_, appKey, _ := vectors(t)
 	writeAppKey(t, dir, appKey)
 	d, err := keys.Derive("7KQM4X9TR", appKey)
@@ -1146,8 +1197,7 @@ func TestHostReloadKeepsLANSessionWhenKeyIsUnchanged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	done, stop := startHost(t, dir)
-	waitForControl(t, dir, done)
+	udpPort, tcpPort, _, stop := startLANHost(t, dir, `{"key":"7KQ-M4X-9TR","services":{"echo":{"target":"127.0.0.1:9","kind":"tcp"}},"lan":{"discoveryPort":%[1]d,"port":%[2]d}}`)
 	defer stop()
 
 	// An app attaches over the LAN route, as the LAN client of the tests does.
@@ -1242,7 +1292,7 @@ func TestHostPrintsNoBannerWhenTheControlSocketCannotServe(t *testing.T) {
 	tn := hyperdht.NewTestnet(t, testnetSize)
 	useTestnet(t, tn)
 	dir := shortDir(t)
-	writeHostJSON(t, dir, keyHostJSON)
+	writeHostJSON(t, dir, `{"key":"7KQ-M4X-9TR","lan":{"enabled":false}}`)
 	_, appKey, _ := vectors(t)
 	writeAppKey(t, dir, appKey)
 	if err := os.Chmod(dir, 0o755); err != nil {
@@ -1280,5 +1330,245 @@ func TestBootstrapFlagBeatsEnvironmentWhichBeatsDefault(t *testing.T) {
 	got, err = bootstrapFlag(map[string]string{}, Env{Getenv: func(string) string { return "" }})
 	if err != nil || !slices.Equal(got, bootstrap) {
 		t.Errorf("no flag, no env: nodes %v, %v; want the default list", got, err)
+	}
+}
+
+// bannerListener starts a TCP server on 127.0.0.1 that writes an SSH banner as soon as a client connects, and holds the
+// connection until the client closes it. It returns the server's address and stops when the test ends.
+func bannerListener(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				c.Write([]byte("SSH-2.0-test\r\n"))
+				io.Copy(io.Discard, c)
+			}()
+		}
+	}()
+	return l.Addr().String()
+}
+
+// httpService starts a plain HTTP server on 127.0.0.1 and returns its address. It stops when the test ends.
+func httpService(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.Listener.Addr().String()
+}
+
+// handshakeKind returns the kind that hs lists for service, or KindUnknown when it lists none.
+func handshakeKind(hs protocol.Handshake, service string) protocol.Kind {
+	for _, s := range hs.Services {
+		if s.Name == service {
+			return s.Kind
+		}
+	}
+	return protocol.KindUnknown
+}
+
+// awaitHandshake opens sessions with the host at hostPub, one after another, until ok reports true for the handshake of
+// one of them, and returns that handshake. Each attempt is a new session, because a handshake carries the kinds known
+// when its session opened. It fails the test after 60 s.
+func awaitHandshake(t *testing.T, node *hyperdht.DHT, hostPub [32]byte, clientKP ed25519.PrivateKey, ok func(protocol.Handshake) bool) protocol.Handshake {
+	t.Helper()
+	deadline := time.Now().Add(60 * time.Second)
+	var last protocol.Handshake
+	for {
+		c, err := hosttest.Connect(node, hostPub, clientKP)
+		if err == nil {
+			last = c.Handshake()
+			c.Close()
+			if ok(last) {
+				return last
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no session showed the expected kinds within 60 s; last services %+v, last connect error %v", last.Services, err)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// stopHost interrupts the host that startHost started and waits for holebridge host to return, so that its LAN ports
+// are free for the next test.
+func stopHost(t *testing.T, done <-chan hostDone, stop context.CancelFunc) {
+	t.Helper()
+	stop()
+	select {
+	case d := <-done:
+		if d.code != 0 {
+			t.Errorf("host exit code = %d, want 0 (stderr %q)", d.code, d.stderr)
+		}
+	case <-time.After(30 * time.Second):
+		t.Error("holebridge host did not return within 30 s of its interrupt")
+	}
+}
+
+// Case 6: a service with no kind in host.json is detected by the running host. A plain HTTP service is http, and a TCP
+// service that writes its own banner is tcp, so one probe of each settles it. The kinds reach the app in the handshake
+// of a session, they are saved in kinds.json, and holebridge status lists them.
+func TestHostDetectsKindsAndSendsThemInTheHandshake(t *testing.T) {
+	tn := hyperdht.NewTestnet(t, testnetSize)
+	useTestnet(t, tn)
+	dir := shortDir(t)
+	web, raw := httpService(t), bannerListener(t)
+	// The LAN route is off: these cases are about kinds, and the default LAN ports are shared with other hosts on this machine.
+	doc, err := json.Marshal(map[string]any{
+		"key": keys.Format(keys.Generate()),
+		"lan": map[string]any{"enabled": false},
+		"services": map[string]map[string]string{
+			"web": {"target": web},
+			"raw": {"target": raw},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "host.json"), doc, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done, stop := startHost(t, dir)
+	waitForControl(t, dir, done)
+
+	appKey, err := config.LoadAppKey(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := keys.Derive(cfg.Key, appKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	node, err := hyperdht.New(hyperdht.Config{Bootstrap: tn.Bootstrap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer node.Close()
+	hostPub := [32]byte(d.Host.Public().(ed25519.PublicKey))
+
+	hs := awaitHandshake(t, node, hostPub, d.Client, func(hs protocol.Handshake) bool {
+		return handshakeKind(hs, "web") == protocol.KindHTTP && handshakeKind(hs, "raw") == protocol.KindTCP
+	})
+	if k := handshakeKind(hs, "web"); k != protocol.KindHTTP {
+		t.Errorf("handshake kind of web = %d, want %d (http)", k, protocol.KindHTTP)
+	}
+	if k := handshakeKind(hs, "raw"); k != protocol.KindTCP {
+		t.Errorf("handshake kind of raw = %d, want %d (tcp)", k, protocol.KindTCP)
+	}
+
+	state, err := config.LoadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := state.Kinds["web"]; got != "http" {
+		t.Errorf("kinds.json holds web = %q, want http", got)
+	}
+	st, err := queryStatus(dir)
+	if err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if !hasService(st, "web", "http") {
+		t.Errorf("status does not list web as http: %+v", st.Services)
+	}
+	stopHost(t, done, stop)
+}
+
+// Case 7: a service added to a running host is detected at once. The add reloads the host over the control socket, and
+// the status answer lists the service as http without a restart.
+func TestHostDetectsKindOfAServiceAddedWhileRunning(t *testing.T) {
+	tn := hyperdht.NewTestnet(t, testnetSize)
+	useTestnet(t, tn)
+	dir := shortDir(t)
+	web := httpService(t)
+	doc, err := json.Marshal(map[string]any{"key": keys.Format(keys.Generate()), "lan": map[string]any{"enabled": false}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "host.json"), doc, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	done, stop := startHost(t, dir)
+	waitForControl(t, dir, done)
+
+	code, _, stderr := run("--config", dir, "service", "add", "web", web)
+	if code != 0 {
+		t.Fatalf("service add exit code = %d, stderr: %s", code, stderr)
+	}
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		st, err := queryStatus(dir)
+		if err == nil && hasService(st, "web", "http") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("status did not list the added service web as http: services %+v, error %v", st.Services, err)
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	stopHost(t, done, stop)
+}
+
+// Case 8: share keeps nothing on disk, so its kinds are detected in memory: the handshake of a session lists the
+// service as http, and neither kinds.json nor host.json appears in the current directory.
+func TestShareDetectsKindsWithoutWritingKindsJSON(t *testing.T) {
+	tn := hyperdht.NewTestnet(t, testnetSize)
+	t.Chdir(t.TempDir())
+	web := httpService(t)
+	appKey := keys.NewAppKey()
+	cfg := config.Defaults()
+	cfg.Key = keys.Generate()
+	cfg.Services["web"] = config.Service{Target: web}
+	d, err := keys.Derive(cfg.Key, appKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rh, err := defaultHostRunner{}.Start(ctx, hostRequest{
+		Config:    cfg,
+		AppKey:    appKey,
+		LAN:       false,
+		Bootstrap: tn.Bootstrap,
+		Logger:    slog.New(slog.DiscardHandler),
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	node, err := hyperdht.New(hyperdht.Config{Bootstrap: tn.Bootstrap})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer node.Close()
+	hostPub := [32]byte(d.Host.Public().(ed25519.PublicKey))
+
+	awaitHandshake(t, node, hostPub, d.Client, func(hs protocol.Handshake) bool {
+		return handshakeKind(hs, "web") == protocol.KindHTTP
+	})
+	cancel()
+	if err := rh.Wait(); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	for _, name := range []string{"kinds.json", "host.json"} {
+		if _, err := os.Stat(name); err == nil {
+			t.Errorf("share wrote %s in the current directory, want nothing on disk", name)
+		}
 	}
 }

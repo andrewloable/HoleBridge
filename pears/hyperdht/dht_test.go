@@ -75,3 +75,34 @@ func TestCloseStopsServersAndRefusesWork(t *testing.T) {
 		t.Errorf("after Close, Lookup still finds the server's record %v", p)
 	}
 }
+
+// TestEphemeralNodeIsNotLookedUp makes a node with Config.Ephemeral, and a server on it. The node has no id, and
+// it answers no LOOKUP, so the route of its server is found only on the other testnet nodes, which hold it. A
+// client's walk then reaches the server through one of them, never on the server's own node.
+func TestEphemeralNodeIsNotLookedUp(t *testing.T) {
+	tn := startTestnet(t, 10)
+	d, err := New(Config{Bootstrap: tn.Bootstrap, Ephemeral: true})
+	must(t, err)
+	t.Cleanup(func() { d.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := d.Ready(ctx); err != nil {
+		t.Fatalf("DHT not ready: %v", err)
+	}
+	if d.node.ID() != nil {
+		t.Fatal("an ephemeral node has an id, so it would answer LOOKUP")
+	}
+
+	kp := testKeyPair(6)
+	listenOn(t, d.CreateServer(ServerOptions{}), kp)
+	results := lookupAll(t, tn.Nodes[9], hashKey(kp.Public))
+	if _, ok := peerOf(results, kp.Public); !ok {
+		t.Fatal("Lookup from node 9 found no route for the ephemeral node's server")
+	}
+	self := nodeAddr(t, d)
+	for _, r := range results {
+		if r.From != nil && r.From.IP.Equal(self.IP) && r.From.Port == self.Port {
+			t.Errorf("the ephemeral node answered the Lookup for its own server's key")
+		}
+	}
+}

@@ -7,12 +7,15 @@ const Protomux = require('protomux')
 const TCP = require('bare-tcp')
 const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const b4a = require('b4a')
+const UDX = require('udx-native')
 const keys = require('../../lib/keys.js')
 const protocol = require('../../lib/protocol.js')
 const { Session, Budget } = require('../../lib/mux.js')
 
 const PROTOCOL = 'holebridge'
 const MIB = 1024 * 1024
+// The UDP sockets of the flows: one UDX instance for the process, as lib/udp.js uses.
+let udx = null
 // HANG_MS is how long a 'hang' service holds its open before it is rejected with code 4. The mux answers
 // an open at once, so the host holds the open message itself.
 const HANG_MS = 300
@@ -22,6 +25,12 @@ function noop() {}
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// udpSocket makes a UDP socket on 127.0.0.1's side of a flow.
+function udpSocket() {
+  if (udx === null) udx = new UDX()
+  return udx.createSocket()
 }
 
 // describe returns the handshake entry of a service. The port is the hint for the app's listener: the
@@ -44,8 +53,10 @@ function handshakeEntry(service) {
  * - key: the typed test key, e.g. '7KQ-M4X-9TR'. It is normalized and derived with lib/keys.js.
  * - appKey: the 32-byte application key, as a Buffer.
  * - services: [{ name, kind, target }]. kind is unknown, https, http, tcp or udp. target is { port }
- *   (a TCP service at 127.0.0.1:port), 'refuse' (the open is rejected with code 3) or 'hang' (rejected
- *   with code 4 after HANG_MS). Default [].
+ *   (a TCP service at 127.0.0.1:port, or for kind udp a UDP service at 127.0.0.1:port), 'refuse' (the open
+ *   is rejected with code 3) or 'hang' (rejected with code 4 after HANG_MS). Default [].
+ *   A flow (message 9) to a udp service is relayed to its port, and each reply comes back as a datagram
+ *   (message 10) on the flow. The mux serves no flows, so the fake host does this itself.
  * - flags: handshake flag bits, default 0. The lan bit is set by the lan option, not here.
  * - lan: false (default), or { addresses, port } for the handshake's lan block, or true. true also starts
  *   the LAN listener on 127.0.0.1 (a port the OS picks) and advertises it in the lan block with address
@@ -113,19 +124,42 @@ async function createFakeHost({ testnet, key, appKey, services = [], flags = 0, 
     if (onStream) onStream(socket)
     const mux = Protomux.from(socket)
     let session = null
+    let channel = null
     let queue = Promise.resolve()
+    const flows = new Map() // flow id -> { sock, port }: the UDP socket of a flow and its service's port
     socket.once('close', () => {
       conns.delete(socket)
       if (session) session.destroy()
+      for (const flow of flows.values()) flow.sock.close().catch(noop)
+      flows.clear()
     })
+
+    const isUdp = (name) => byName.get(name)?.kind === 'udp' && typeof byName.get(name).target === 'object'
+
+    // A flow to a udp service opens a UDP socket to the service's port. Its replies go back as datagrams (10).
+    const openFlow = ({ flow, service, payload }) => {
+      const sock = udpSocket()
+      sock.on('error', noop)
+      sock.on('message', (reply) => channel.messages[10].send({ flow, payload: b4a.from(reply) }))
+      sock.bind(0, '127.0.0.1')
+      const port = byName.get(service).target.port
+      flows.set(flow, { sock, port })
+      sock.trySend(payload, port, '127.0.0.1')
+    }
 
     const deliver = async (index, message) => {
       if (index === 0 && byName.get(message.service)?.target === 'hang') await delay(HANG_MS)
+      if (index === 9 && isUdp(message.service)) return openFlow(message)
+      if (index === 10 && flows.has(message.flow)) {
+        const { sock, port } = flows.get(message.flow)
+        sock.trySend(message.payload, port, '127.0.0.1')
+        return
+      }
       if (!session.closed) session.receive(index, message)
     }
 
     mux.pair({ protocol: PROTOCOL }, () => {
-      const channel = mux.createChannel({
+      channel = mux.createChannel({
         protocol: PROTOCOL,
         handshake: protocol.handshake,
         messages: protocol.messages.map((encoding, index) => ({

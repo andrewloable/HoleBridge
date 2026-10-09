@@ -34,3 +34,6 @@ Thumbs.db
 
 # App engine bundle output (npm run bundle)
 app/engine/dist/
+
+# Release archives and checksums (scripts/release-build.sh)
+/dist/

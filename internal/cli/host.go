@@ -24,8 +24,10 @@ import (
 	"github.com/andrewloable/HoleBridge/internal/errs"
 	"github.com/andrewloable/HoleBridge/internal/host"
 	"github.com/andrewloable/HoleBridge/internal/keys"
+	"github.com/andrewloable/HoleBridge/internal/kinds"
 	"github.com/andrewloable/HoleBridge/internal/lan"
 	"github.com/andrewloable/HoleBridge/internal/log"
+	"github.com/andrewloable/HoleBridge/internal/protocol"
 	"github.com/andrewloable/HoleBridge/internal/status"
 	"github.com/andrewloable/HoleBridge/pears/dhtrpc"
 	"github.com/andrewloable/HoleBridge/pears/hyperdht"
@@ -271,11 +273,13 @@ func hostingLine(cfg *config.Config, state config.State) string {
 }
 
 // control is the handler of the control socket. Reload re-reads host.json into the host. Status answers from the
-// config the host last applied, the DHT node's NAT state, the relay setting and the host's live sessions.
+// config the host last applied, the DHT node's NAT state, the relay setting the host started with and the host's
+// live sessions.
 type control struct {
-	h   *host.Host
-	dir string
-	dht *hyperdht.DHT
+	h     *host.Host
+	dir   string
+	dht   *hyperdht.DHT
+	relay bool // whether host.json had a relay when the host started: set once, so a reload does not change it
 
 	mu  sync.Mutex
 	cfg *config.Config // the config the host runs: set at start and after each reload
@@ -296,10 +300,10 @@ func (c *control) Reload() error {
 	return nil
 }
 
-// Status returns the services of the applied config with their kinds, the NAT state, whether a relay is set and the
-// live sessions of the host. A kind is the one host.json names, else the one detected and saved in kinds.json, else
-// "detecting". A kinds.json that cannot be read leaves every kind as "detecting": the kinds are a display detail, not
-// part of the service.
+// Status returns the services of the applied config with their kinds, the NAT state, whether a relay was set when the
+// host started (not what host.json says now) and the live sessions of the host. A kind is the one host.json names,
+// else the one detected and saved in kinds.json, else "detecting". A kinds.json that cannot be read leaves every kind
+// as "detecting": the kinds are a display detail, not part of the service.
 func (c *control) Status() status.Status {
 	c.mu.Lock()
 	cfg := c.cfg
@@ -311,7 +315,7 @@ func (c *control) Status() status.Status {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	st := status.Status{NAT: c.dht.NAT(), Relay: cfg.Relay != "", Sessions: []status.Session{}}
+	st := status.Status{NAT: c.dht.NAT(), Relay: c.relay, Sessions: []status.Session{}}
 	for _, name := range names {
 		kind := cfg.Services[name].Kind
 		if kind == "" {
@@ -358,28 +362,50 @@ type hostRunner interface {
 // DHT node, with the LAN responder and listener when the request turns LAN on.
 type defaultHostRunner struct{}
 
+// hostDHTConfig returns the configuration of the DHT node a host runs on: the bootstrap nodes, and with a relay in cfg,
+// the member key pair of that relay as the default key pair, so that the relay admits the host's relayed dials
+// (docs/architecture.md, Relay route). Without a relay the default key pair is left as the DHT makes it. It does not
+// start the node, so the choice can be tested without the network.
+func hostDHTConfig(cfg *config.Config, appKey [32]byte, bootstrap []string) (hyperdht.Config, error) {
+	kp, err := host.DefaultKeyPair(cfg.Relay, appKey)
+	if err != nil {
+		return hyperdht.Config{}, err
+	}
+	return hyperdht.Config{Bootstrap: bootstrap, DefaultKeyPair: kp}, nil
+}
+
 // Start starts the DHT node and the host, binds the LAN ports when the request turns LAN on, and runs the host in the
 // background until ctx ends or the host fails. A LAN port that another program holds fails with HB-LAN-PORT-IN-USE,
-// before anything serves.
+// before anything serves. The kinds watcher checks the services that have no kind; its state is kinds.json in req.Dir,
+// and nothing is kept on disk when req.Dir is empty.
 func (defaultHostRunner) Start(ctx context.Context, req hostRequest) (runningHost, error) {
-	d, err := hyperdht.New(hyperdht.Config{Bootstrap: req.Bootstrap})
+	dhtCfg, err := hostDHTConfig(req.Config, req.AppKey, req.Bootstrap)
 	if err != nil {
 		return nil, err
 	}
-	h, err := host.New(req.Config, req.AppKey, host.Options{DHT: d, Dir: req.Dir, Log: req.Logger})
+	d, err := hyperdht.New(dhtCfg)
+	if err != nil {
+		return nil, err
+	}
+	w := kinds.NewWatcher(req.Config, req.Dir, func(ctx context.Context, target string) (protocol.Kind, bool) {
+		return kinds.Detect(ctx, target, kinds.Options{})
+	}, time.Now)
+	h, err := host.New(req.Config, req.AppKey, host.Options{DHT: d, Dir: req.Dir, Log: req.Logger, Kinds: w.Kind, Touch: w.Touch})
 	if err != nil {
 		d.Close()
 		return nil, err
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	lh := &liveHost{
-		control: &control{h: h, dir: req.Dir, dht: d, cfg: req.Config},
+		control: &control{h: h, dir: req.Dir, dht: d, relay: req.Config.Relay != "", cfg: req.Config},
 		start:   req.Config,
 		appKey:  req.AppKey,
 		logger:  req.Logger,
 		ctx:     runCtx,
 		cancel:  cancel,
 		stopped: make(chan struct{}),
+		watcher: w,
+		watched: make(chan struct{}),
 	}
 	if req.LAN {
 		route, err := startLAN(runCtx, h, req.Config, req.AppKey, req.Logger)
@@ -396,12 +422,17 @@ func (defaultHostRunner) Start(ctx context.Context, req hostRequest) (runningHos
 		cancel() // a host that failed to listen stops its LAN route too
 		close(lh.stopped)
 	}()
+	go func() {
+		w.Run(runCtx) // returns once runCtx ends, after its in-flight probes
+		close(lh.watched)
+	}()
 	return lh, nil
 }
 
 // liveHost is a host that defaultHostRunner started: the runningHost of the command, and the handler of the control
 // socket. Its Reload also moves the LAN route to a changed key, since the LAN listener is keyed by the host key and
-// internal/host does not move it.
+// internal/host does not move it. Its Reload also gives the kinds watcher the applied config, so a service added while
+// the host runs is checked at once.
 type liveHost struct {
 	*control
 	start   *config.Config // the config the host started with: the LAN ports and limits are read at start
@@ -411,6 +442,8 @@ type liveHost struct {
 	cancel  context.CancelFunc // ends the host and its LAN route
 	stopped chan struct{}      // closed when the host's Run has returned
 	runErr  error              // Run's error, read after stopped
+	watcher *kinds.Watcher     // the kinds of the services with no kind
+	watched chan struct{}      // closed when the watcher's Run has returned
 
 	lanMu sync.Mutex
 	lan   *lanRoute // nil while the LAN route is off
@@ -438,6 +471,11 @@ func (lh *liveHost) Reload() error {
 	if err := lh.control.Reload(); err != nil {
 		return err
 	}
+	lh.control.mu.Lock()
+	applied := lh.control.cfg
+	lh.control.mu.Unlock()
+	lh.watcher.Reload(applied)
+
 	lh.lanMu.Lock()
 	defer lh.lanMu.Unlock()
 	if lh.lan == nil {
@@ -462,9 +500,11 @@ func (lh *liveHost) Reload() error {
 	return nil
 }
 
-// Wait returns once the host has stopped, then closes the LAN route and the DHT node.
+// Wait returns once the host and the kinds watcher have stopped, then closes the LAN route and the DHT node. The
+// watcher stops with the host's context, and its probes end before its Run returns, so no probe outlives Wait.
 func (lh *liveHost) Wait() error {
 	<-lh.stopped
+	<-lh.watched
 	lh.lanMu.Lock()
 	if lh.lan != nil {
 		lh.lan.close()

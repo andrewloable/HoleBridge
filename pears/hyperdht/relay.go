@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -30,6 +31,10 @@ const relayConnectWait = 15 * time.Second
 
 // errClaimLost is the error of a relay pairing whose stream the direct path claimed first.
 var errClaimLost = errors.New("hyperdht: stream already claimed")
+
+// errClaimHeld is the error of a relay pairing that took the stream's claim and then failed before the stream was
+// connected. The claim is the pairing's alone from then on, so the stream is the pairing's to end.
+var errClaimHeld = errors.New("hyperdht: relay pairing holds the stream claim and failed")
 
 // relayOffer is a relay a connection can go through: the public key the relay listens under, and the token
 // that pairs the two sides on it.
@@ -145,7 +150,9 @@ func selectRelay(policy func(force bool) *[32]byte, force bool) *[32]byte {
 // pairRelay dials the relay r.key with the DHT's default key pair, and pairs the stream st on it with initiator and
 // r.token. The relay admits the dial or refuses it by that key. Once the pairing lands and no other path has claimed
 // st, st connects to the relay at the id the pairing gave, which claims it; the returned stream owns the relay
-// connection. It returns errClaimLost when the direct path claimed st first, with the pairing given up. The relay
+// connection. It returns errClaimLost when the direct path claimed st first, with the pairing given up, and errClaimHeld
+// when the pairing took the claim and then failed to connect st: the claim is then the caller's to act on, so the caller
+// ends st (serveRelayed does). The relay
 // dial is direct (never forced), since it is not a stream under test. The blind-relay channel opens under the
 // default key pair's public key, the id upstream gives it, so the relay pairs it with the same connection. ctx ends
 // the pairing, and relayConnectWait bounds it. The address returned is the relay's, where st connected.
@@ -176,7 +183,7 @@ func (d *DHT) pairRelay(ctx context.Context, cl *streamClaim, st *udx.Stream, r 
 	}
 	if err := st.Connect(p.RemoteID, addr); err != nil {
 		conn.Close()
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("%w: %w", errClaimHeld, err)
 	}
 	_ = st.SendMessage(nil) // the relay learns this side's address from it; a lost message is harmless
 	return &relayedStream{Stream: st, relay: conn}, addr, nil

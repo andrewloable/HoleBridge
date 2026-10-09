@@ -122,7 +122,13 @@ func hdCall(peer *jsNode, cmd any, timeout time.Duration, reply any) {
 // newHDGoNode starts a Go HyperDHT node that joins the network of bootstrap, and waits until it is bootstrapped.
 func newHDGoNode(t *testing.T, bootstrap []string) *hyperdht.DHT {
 	t.Helper()
-	d, err := hyperdht.New(hyperdht.Config{Bootstrap: bootstrap})
+	return newHDGoNodeWith(t, hyperdht.Config{Bootstrap: bootstrap})
+}
+
+// newHDGoNodeWith starts a Go HyperDHT node with cfg, and waits until it is bootstrapped.
+func newHDGoNodeWith(t *testing.T, cfg hyperdht.Config) *hyperdht.DHT {
+	t.Helper()
+	d, err := hyperdht.New(cfg)
 	if err != nil {
 		t.Fatalf("start Go HyperDHT node: %v", err)
 	}
@@ -130,7 +136,7 @@ func newHDGoNode(t *testing.T, bootstrap []string) *hyperdht.DHT {
 	ctx, cancel := context.WithTimeout(context.Background(), hdStartTimeout)
 	defer cancel()
 	if err := d.Ready(ctx); err != nil {
-		t.Fatalf("Go HyperDHT node did not bootstrap on %v: %v", bootstrap, err)
+		t.Fatalf("Go HyperDHT node did not bootstrap on %v: %v", cfg.Bootstrap, err)
 	}
 	return d
 }
@@ -448,7 +454,11 @@ func runHyperDHT(t *testing.T, bootstrap []string) {
 
 	t.Run("RelayGoServerJSClient", func(t *testing.T) {
 		relayPK, relay := startHDRelay(t, bootstrap)
-		serverDHT := newHDGoNode(t, bootstrap)
+		// The server's node is ephemeral, so it has no id and answers no LOOKUP for its own key. If it did, the JS
+		// client's walk would reach that node, which answers the handshake directly; the JS client would then connect
+		// straight to it and drop the relay pairing. Ephemeral, the handshake reaches the server through a testnet node
+		// that holds its route, so the connection is relayed.
+		serverDHT := newHDGoNodeWith(t, hyperdht.Config{Bootstrap: bootstrap, Ephemeral: true})
 		// ForceRelayForTest takes away the direct claim: the server's stream is claimed only by its relay pairing, and
 		// Relayed reports it. The relay is the one server option the JS client also uses (--relay).
 		hyperdht.ForceRelayForTest(t, serverDHT)

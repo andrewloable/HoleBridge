@@ -210,7 +210,7 @@ MVP.
 
 Epic: `HoleBridge-6yy`
 
-- Release archives for every OS and architecture, built from a tag.
+- Release archives for every OS and architecture, built when a person publishes a release on GitHub.
 - Start-at-boot units: systemd, launchd, Windows (decisions D27).
 - App releases: Play Store (phone and TV), App Store, desktop installers.
 - A changelog.
@@ -218,7 +218,7 @@ Epic: `HoleBridge-6yy`
 **Done when:**
 - The app installs from the stores and desktop installers.
 - Bare-metal hosts start at boot.
-- A tag produces the host release with no manual steps.
+- Publishing a release on GitHub for a tag uploads the host archives to it with no further manual steps.
 
 ## Not planned until asked
 

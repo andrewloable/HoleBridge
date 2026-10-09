@@ -16,7 +16,8 @@ import (
 // reaches the control socket; SIGHUP runs it too once the host command wires it.
 //
 // The file is read and checked before anything changes, so a bad host.json leaves the host as it was. The LAN
-// route and the limits are read at start and do not change here.
+// route, the limits and the relay key are read at start and do not change here: the DHT node's default key pair is
+// set when the node is made, so a relay change takes a restart.
 func (h *Host) Reload() error {
 	if h.dir == "" {
 		return errors.New("host: no config directory to reload from")
