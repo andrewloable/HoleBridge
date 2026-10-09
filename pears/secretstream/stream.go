@@ -59,6 +59,10 @@ type unorderedSender interface{ SendMessage([]byte) error }
 // unorderedReceiver is implemented by UDX streams, which deliver the peer's unordered messages.
 type unorderedReceiver interface{ Messages() <-chan []byte }
 
+// doneSignaler is implemented by UDX streams, which close Done when they are torn down: by Destroy or Close, by the
+// peer's DESTROY, or by a timeout. The unordered messages of a torn-down connection end with it.
+type doneSignaler interface{ Done() <-chan struct{} }
+
 // Stream is a Noise-authenticated secret stream over a duplex connection.
 type Stream struct {
 	conn        io.ReadWriteCloser
@@ -76,15 +80,18 @@ type Stream struct {
 	recvKey   [32]byte // opens the peer's unordered messages
 	sendCount uint64   // the unordered message counter; the key is unique per handshake, so it starts at zero
 
-	wmu  sync.Mutex    // serializes writes: data, keepalive and unordered messages
-	last time.Time     // when a message was last written, for keepalive; guarded by wmu
-	done chan struct{} // closed by Close
-	msgs chan []byte   // the peer's unordered messages, opened; see Messages
+	wmu       sync.Mutex    // serializes writes: data, keepalive and unordered messages
+	last      time.Time     // when a message was last written, for keepalive; guarded by wmu
+	done      chan struct{} // closed by Close
+	torn      chan struct{} // closed when the connection is closed whole, by Destroy or by Close after the peer ended
+	msgs      chan []byte   // the peer's unordered messages, opened; see Messages
+	loopEnded chan struct{} // closed when receiveMessages returns
 
 	closeOnce   sync.Once
 	closeErr    error
 	destroyOnce sync.Once
 	destroyErr  error
+	tornOnce    sync.Once
 	readEnded   atomic.Bool // set when Read hits an error, such as the peer's end
 
 	pending []byte // decrypted data that Read has not returned yet
@@ -102,7 +109,9 @@ func New(conn io.ReadWriteCloser, isInitiator bool, opts Options) *Stream {
 		remote:      opts.RemotePublicKey,
 		keepalive:   opts.Keepalive,
 		done:        make(chan struct{}),
+		torn:        make(chan struct{}),
 		msgs:        make(chan []byte),
+		loopEnded:   make(chan struct{}),
 	}
 }
 
@@ -288,7 +297,7 @@ func (s *Stream) fill() error {
 		if s.rerr = s.readMessage(); s.rerr != nil {
 			s.readEnded.Store(true)
 			if s.isClosed() {
-				s.conn.Close() // Close ran first and only ended the outgoing side
+				s.closeWhole() // Close ran first and only ended the outgoing side
 			}
 		}
 	}
@@ -367,12 +376,12 @@ func (s *Stream) Close() error {
 		close(s.done)
 		cw, ok := s.conn.(closeWriter)
 		if !ok {
-			s.closeErr = s.conn.Close()
+			s.closeErr = s.closeWhole()
 			return
 		}
 		s.closeErr = cw.CloseWrite()
 		if s.readEnded.Load() {
-			s.conn.Close() // the peer ended first, so nothing is left to read
+			s.closeWhole() // the peer ended first, so nothing is left to read
 		}
 	})
 	return s.closeErr
@@ -381,11 +390,19 @@ func (s *Stream) Close() error {
 // Destroy closes the connection whole: the read side ends as well as the write side, at once. Close only ends the
 // write side on a connection that can (TCP, UDX), so a peer that ignores END keeps the connection and its reads
 // open; Destroy does not leave it that way. For a UDX stream the transport sends DESTROY, and for TCP the socket
-// closes. It is safe to call more than once, and after Close.
+// closes. Unordered messages stop too: Messages closes even while a message from the peer waits for a reader.
+// It is safe to call more than once, and after Close.
 func (s *Stream) Destroy() error {
 	s.closeOnce.Do(func() { close(s.done) })
-	s.destroyOnce.Do(func() { s.destroyErr = s.conn.Close() })
+	s.destroyOnce.Do(func() { s.destroyErr = s.closeWhole() })
 	return s.destroyErr
+}
+
+// closeWhole closes the connection whole. Its unordered messages stop with it, so the receive loop ends too, even
+// while it waits to deliver one. It is safe to call more than once.
+func (s *Stream) closeWhole() error {
+	s.tornOnce.Do(func() { close(s.torn) })
+	return s.conn.Close()
 }
 
 // isClosed reports whether Close has run.
@@ -437,25 +454,50 @@ func (s *Stream) Send(b []byte) error {
 // Messages returns the channel that carries the peer's unordered messages, opened, in the order they arrive.
 // A message that does not open is dropped without an error, as upstream drops it. The channel closes when the
 // connection's Messages channel closes, which UDX does when the stream is torn down. A connection without
-// unordered messages has none to deliver, so the channel closes at Close. It is never closed when Handshake
-// fails, so read it only after Handshake succeeds.
+// unordered messages has none to deliver, so the channel closes at Close. The channel also closes when the
+// connection is closed whole, by Destroy or by Close after the peer ended, and when the peer tears a UDX stream
+// down, even while a message waits for a reader. It is never closed when Handshake fails, so read it only after
+// Handshake succeeds.
 func (s *Stream) Messages() <-chan []byte {
 	return s.msgs
 }
 
 // receiveMessages opens the peer's unordered messages and delivers them on msgs. It runs once, after a
-// successful Handshake, and ends when the connection's Messages channel closes. Messages keep arriving
-// after Close, which ends only this side's write side on UDX, as upstream's end does.
+// successful Handshake, and ends when the connection's Messages channel closes, or when the connection is
+// closed whole, even while it waits for a reader to take a message. A UDX connection also ends it when the
+// peer tears the stream down, which closes its Done channel. A message that a reader is ready to take is
+// delivered first, even when the teardown is already seen; only a message that waits with no reader is dropped
+// at teardown. Messages keep arriving after Close, which ends only this side's write side on UDX, as upstream's
+// end does.
 func (s *Stream) receiveMessages() {
+	defer close(s.loopEnded)
 	defer close(s.msgs)
 	r, ok := s.conn.(unorderedReceiver)
 	if !ok {
 		<-s.done
 		return
 	}
+	// A connection without Done gives a nil channel here, which the select below never picks.
+	var connDone <-chan struct{}
+	if d, ok := s.conn.(doneSignaler); ok {
+		connDone = d.Done()
+	}
 	for m := range r.Messages() {
 		if plain, ok := openUnordered(s.recvKey, m); ok {
-			s.msgs <- plain
+			// The blocking select below picks at random when a reader and a seen teardown are both ready, so a
+			// reader that is already parked gets the message here first.
+			select {
+			case s.msgs <- plain:
+				continue
+			default:
+			}
+			select {
+			case s.msgs <- plain:
+			case <-s.torn:
+				return
+			case <-connDone:
+				return
+			}
 		}
 	}
 }

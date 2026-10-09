@@ -5,6 +5,7 @@
 package hyperdht
 
 import (
+	"context"
 	crand "crypto/rand"
 	"errors"
 	rand "math/rand/v2"
@@ -13,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/andrewloable/HoleBridge/pears/dhtrpc"
 	"golang.org/x/crypto/blake2b"
 	"golang.org/x/crypto/nacl/secretbox"
 )
@@ -48,6 +50,9 @@ const cmdPeerHolepunch = 1
 // Pauses of the punch loops that punchTiming does not set (lib/holepuncher.js).
 const keepAliveWait = 100 * time.Millisecond
 
+// maxReopens is upstream's MAX_REOPENS: an unstable socket is reopened on at most this many fresh sockets.
+const maxReopens = 3
+
 // errPunchGated is what punch returns when a randomized punch may not begin yet: the DHT's gate on randomized punches
 // is at its limit, or the interval after the last one has not passed. No datagram is sent.
 var errPunchGated = errors.New("hyperdht: randomized punches are at their limit")
@@ -56,8 +61,9 @@ var errPunchGated = errors.New("hyperdht: randomized punches are at their limit"
 // randomize their ports, so no punch is tried. punch returns it without sending a datagram.
 var ErrHolepunchDoubleRandomized = errors.New("hyperdht: both remote and local NATs are randomized")
 
-// punchSocket is a UDP socket a holepuncher punches from. Upstream's socket is a UDX socket; the port needs only
-// its address, the one-byte holepunch datagram, and the handler for holepunch datagrams that arrive on it.
+// punchSocket is a UDP socket a holepuncher punches from. Upstream's socket is a UDX socket; the port needs its address,
+// the one-byte holepunch datagram, the handler for holepunch datagrams that arrive on it, and the dht-rpc requests and
+// NAT samples that the socket makes (upstream's socket option of request and nat sampling).
 type punchSocket interface {
 	// Local returns the socket's own address.
 	Local() *net.UDPAddr
@@ -66,6 +72,11 @@ type punchSocket interface {
 	// OnPunch sets the handler for holepunch datagrams that arrive on the socket. The handler gets the source
 	// address the receiver sees.
 	OnPunch(handler func(from *net.UDPAddr))
+	// Request sends a dht-rpc request from the socket to to, and returns the reply that comes back to the socket. The
+	// probes of a punch that run from this socket are sent this way (upstream updateHolepunch's socket option).
+	Request(ctx context.Context, to *net.UDPAddr, req dhtrpc.Request) (*dhtrpc.Response, error)
+	// Observe pings to from the socket, and returns the address that to reports for the socket: one NAT sample.
+	Observe(ctx context.Context, to *net.UDPAddr) (Address, error)
 }
 
 // punchPool hands out the sockets a holepuncher punches from, as upstream's socket pool does. Acquire returns a
@@ -189,7 +200,11 @@ type punchConfig struct {
 	OnPunchFrom func(sock punchSocket, remote *net.UDPAddr)
 	// Gate is the DHT's limit on randomized punches. A randomized punch counts against it from the moment it begins
 	// until it connects or is destroyed. Nil means no limit.
-	Gate   *randomGate
+	Gate *randomGate
+	// Sample takes the NAT samples of the puncher from sock, a socket that analyze has reopened onto (upstream
+	// nat.autoSample on the new socket). Nil means the puncher takes no samples of its own, and an unstable socket
+	// stays unstable.
+	Sample func(ctx context.Context, sock punchSocket, p *holepuncher) error
 	Timing punchTiming
 }
 
@@ -203,7 +218,8 @@ type holepuncher struct {
 	onConnect   func(sock punchSocket, remote *net.UDPAddr)
 	onAbort     func()
 	onPunchFrom func(sock punchSocket, remote *net.UDPAddr)
-	gate        *randomGate   // the DHT's limit on randomized punches, or nil
+	gate        *randomGate // the DHT's limit on randomized punches, or nil
+	sample      func(ctx context.Context, sock punchSocket, p *holepuncher) error
 	stop        chan struct{} // closed by destroy, which ends the pauses
 
 	mu                 sync.Mutex
@@ -217,6 +233,9 @@ type holepuncher struct {
 	isDestroyed        bool
 	heard              bool // a responder has called onPunchFrom
 	gated              bool // this puncher counts against the gate: a randomized punch has begun and not ended
+	reopenOnce         sync.Once
+	reopenStable       bool  // the result of the reopen, which runs once
+	reopenErr          error // the error of the reopen, if any
 }
 
 // remoteAddress is an address the peer reported, and whether it is verified: the peer echoed the token of its host.
@@ -235,6 +254,7 @@ func newHolepuncher(cfg punchConfig) *holepuncher {
 		onAbort:        cfg.OnAbort,
 		onPunchFrom:    cfg.OnPunchFrom,
 		gate:           cfg.Gate,
+		sample:         cfg.Sample,
 		stop:           make(chan struct{}),
 		remoteFirewall: cfg.RemoteFirewall,
 	}
@@ -351,6 +371,80 @@ func (p *holepuncher) openSession(addr Address) {
 	if sock := p.probeSocket(); sock != nil {
 		sendHolepunch(sock, addr, true)
 	}
+}
+
+// analyze reports whether the puncher's NAT is stable (upstream holepuncher analyze). A socket is unstable when both
+// the peer and this NAT randomize, or when this NAT's firewall state is still unknown. An unstable socket is not stable
+// unless allowReopen is set, and then the puncher reopens it: each new socket is a birthday socket of its own, whose NAT
+// is sampled from it, up to MAX_REOPENS (3) sockets. The reopen runs once, and later calls return its result.
+func (p *holepuncher) analyze(ctx context.Context, allowReopen bool) (bool, error) {
+	p.mu.Lock()
+	unstable := p.unstableLocked()
+	p.mu.Unlock()
+	if !unstable {
+		return true, nil
+	}
+	if !allowReopen {
+		return false, nil
+	}
+	p.reopenOnce.Do(func() { p.reopenStable, p.reopenErr = p.reopen(ctx) })
+	return p.reopenStable, p.reopenErr
+}
+
+// unstableLocked reports whether the puncher's socket is unstable (upstream _unstable): the peer and this NAT both
+// randomize, or this NAT's firewall state is still unknown. The caller holds mu.
+func (p *holepuncher) unstableLocked() bool {
+	return (p.remoteFirewall >= firewallRandom && p.nat.firewall >= firewallRandom) || p.nat.firewall == firewallUnknown
+}
+
+// reopen moves the puncher onto fresh sockets while its NAT is unstable (upstream _reopen). Each fresh socket is taken
+// from the pool, a birthday socket of its own when the pool has them, and its NAT is sampled from it. It stops when the
+// NAT is stable, when the puncher is done or punching, or after maxReopens sockets. It reports whether the NAT ends
+// consistent. Without a Sample hook the puncher has no samples for a fresh socket, so it does not reopen at all.
+func (p *holepuncher) reopen(ctx context.Context) (bool, error) {
+	if p.sample == nil {
+		return false, nil
+	}
+	for i := 0; i < maxReopens; i++ {
+		p.mu.Lock()
+		again := p.unstableLocked() && !p.isDestroyed && !p.isConnected && !p.punching
+		p.mu.Unlock()
+		if !again {
+			break
+		}
+		sock, err := p.acquireBirthday()
+		if err != nil {
+			return false, err
+		}
+		if !p.resetNAT(sock) {
+			return false, nil
+		}
+		if err := p.sample(ctx, sock, p); err != nil {
+			return false, err
+		}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return coerceFirewall(p.nat.firewall) == firewallConsistent, nil
+}
+
+// resetNAT makes sock the socket the puncher probes from, in place of the one it had, and starts its NAT samples afresh
+// (upstream _reset). The socket it replaces is released. It returns false, and releases sock, when the puncher is
+// destroyed or connected.
+func (p *holepuncher) resetNAT(sock punchSocket) bool {
+	sock.OnPunch(func(from *net.UDPAddr) { p.onPunchMessage(sock, from) })
+	p.mu.Lock()
+	if p.isDestroyed || p.isConnected || len(p.holders) == 0 {
+		p.mu.Unlock()
+		p.pool.Release(sock)
+		return false
+	}
+	old := p.holders[0]
+	p.holders[0] = sock
+	p.nat = natSamples{}
+	p.mu.Unlock()
+	p.pool.Release(old)
+	return true
 }
 
 // punch starts the punch for the firewall states of both sides, and returns whether a punch is running: a punch

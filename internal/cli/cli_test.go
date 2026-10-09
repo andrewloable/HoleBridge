@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -37,6 +38,7 @@ func run(args ...string) (code int, stdout, stderr string) {
 type probeCall struct {
 	args      []string
 	configDir string
+	level     slog.Level // Env.LogLevel the command was called with
 }
 
 // registerProbe registers a command called name that records each call and returns result. The
@@ -45,7 +47,7 @@ func registerProbe(t *testing.T, name string, result error) *[]probeCall {
 	t.Helper()
 	var calls []probeCall
 	commands[name] = func(args []string, env Env, configDir string) error {
-		calls = append(calls, probeCall{args: args, configDir: configDir})
+		calls = append(calls, probeCall{args: args, configDir: configDir, level: env.LogLevel})
 		return result
 	}
 	t.Cleanup(func() { delete(commands, name) })
@@ -148,6 +150,38 @@ func TestLogLevelVerboseExitsTwo(t *testing.T) {
 			}
 			if len(*calls) != 1 {
 				t.Errorf("command ran %d times, want 1", len(*calls))
+			}
+		})
+	}
+}
+
+// The global --log-level reaches the command as Env.LogLevel, before or after the command. With no option the command
+// sees info, which is the zero level.
+func TestLogLevelReachesTheCommand(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want slog.Level
+	}{
+		{"debug before the command", []string{"--log-level", "debug", "probe"}, slog.LevelDebug},
+		{"debug after the command", []string{"probe", "--log-level", "debug"}, slog.LevelDebug},
+		{"error", []string{"--log-level", "error", "probe"}, slog.LevelError},
+		{"warn", []string{"--log-level", "warn", "probe"}, slog.LevelWarn},
+		{"info", []string{"--log-level", "info", "probe"}, slog.LevelInfo},
+		{"no option", []string{"probe"}, slog.LevelInfo},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := registerProbe(t, "probe", nil)
+			code, _, stderr := run(tc.args...)
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0 (stderr %q)", code, stderr)
+			}
+			if len(*calls) != 1 {
+				t.Fatalf("command ran %d times, want 1", len(*calls))
+			}
+			if got := (*calls)[0].level; got != tc.want {
+				t.Errorf("command saw level %v, want %v", got, tc.want)
 			}
 		})
 	}

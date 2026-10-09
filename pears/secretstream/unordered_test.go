@@ -306,6 +306,143 @@ func TestMessagesCloseWhenUDXStreamIsDestroyed(t *testing.T) {
 	waitClosed(t, msgs)
 }
 
+// Destroy ends delivery when the peer's unordered message is still unread. With no reader on Messages, the
+// receive loop parks on delivering that message; Destroy must free it and close Messages.
+func TestDestroyEndsReceiveWithUnreadMessage(t *testing.T) {
+	_, b, _, cb := resumedPair(t)
+	cb.msgs <- mustHex(t, upstreamHelloEnvelope)
+	waitEmpty(t, cb.msgs) // the receive loop has taken the message, and nothing reads Messages
+	if err := b.Destroy(); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	waitLoopEnded(t, b)
+}
+
+// The same over UDX. The ordered data after the message is read only once the message is on the stream's
+// queue, since both travel in order on one stream, so the loop has the message to take when Destroy runs.
+func TestDestroyEndsReceiveWithUnreadUDXMessage(t *testing.T) {
+	ua, ub := udxPair(t)
+	a, b := streamsOver(t, ua, ub)
+	if err := a.Send([]byte("unread")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if _, err := a.Write([]byte("sync")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got, err := b.ReadFrame(); err != nil || string(got) != "sync" {
+		t.Fatalf("ReadFrame = %q, %v, want %q", got, err, "sync")
+	}
+	waitEmpty(t, ub.Messages())
+	if err := b.Destroy(); err != nil {
+		t.Fatalf("Destroy: %v", err)
+	}
+	waitLoopEnded(t, b)
+}
+
+// Close after the peer has ended also ends delivery. The peer's END ends this side's read side, and Close
+// then closes the connection whole, so no unordered message can arrive for the receive loop to deliver.
+func TestCloseAfterPeerEndedEndsReceiveWithUnreadMessage(t *testing.T) {
+	ua, ub := udxPair(t)
+	a, b := streamsOver(t, ua, ub)
+	if err := a.Send([]byte("unread")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := a.Close(); err != nil {
+		t.Fatalf("peer Close: %v", err)
+	}
+	if _, err := b.ReadFrame(); err != io.EOF {
+		t.Fatalf("ReadFrame after the peer's end = %v, want io.EOF", err)
+	}
+	waitEmpty(t, ub.Messages())
+	if err := b.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	waitLoopEnded(t, b)
+}
+
+// The peer destroys its UDX stream while its unordered message waits on this side with no reader. The peer's
+// DESTROY tears this side's UDX stream down, which closes its Messages channel and its done channel. Nothing calls
+// Destroy, Close or Read here, so the receive loop must end on that teardown alone.
+func TestPeerDestroyEndsReceiveWithUnreadUDXMessage(t *testing.T) {
+	ua, ub := udxPair(t)
+	a, b := streamsOver(t, ua, ub)
+	if err := a.Send([]byte("unread")); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if _, err := a.Write([]byte("sync")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got, err := b.ReadFrame(); err != nil || string(got) != "sync" {
+		t.Fatalf("ReadFrame = %q, %v, want %q", got, err, "sync")
+	}
+	waitEmpty(t, ub.Messages()) // the receive loop has taken the message, and nothing reads Messages
+	if err := ua.Destroy(); err != nil {
+		t.Fatalf("peer Destroy: %v", err)
+	}
+	waitLoopEnded(t, b)
+}
+
+// A message that a live reader is ready to take is delivered even when the peer's DESTROY follows at once:
+// only a message that waits with no reader is dropped at teardown.
+func TestMessageBeforePeerDestroyReachesLiveReader(t *testing.T) {
+	const runs = 50
+	for i := 0; i < runs; i++ {
+		ua, ub := udxPair(t)
+		a, b := streamsOver(t, ua, ub)
+		msgs := messagesOf(t, b)
+		got := make(chan bool, 1)
+		go func() {
+			ok := false
+			for m := range msgs {
+				if string(m) == "last" {
+					ok = true
+				}
+			}
+			got <- ok
+		}()
+		time.Sleep(5 * time.Millisecond) // the reader is parked on Messages
+		if err := a.Send([]byte("last")); err != nil {
+			t.Fatalf("Send: %v", err)
+		}
+		if err := ua.Destroy(); err != nil {
+			t.Fatalf("peer Destroy: %v", err)
+		}
+		select {
+		case ok := <-got:
+			if !ok {
+				t.Fatalf("run %d: the message before the peer's DESTROY was dropped although a reader waited", i)
+			}
+		case <-time.After(wait):
+			t.Fatalf("run %d: Messages did not close", i)
+		}
+	}
+}
+
+// waitLoopEnded fails the test unless the receive loop of s returns within wait, and then Messages is closed with
+// nothing left in it. It does not read Messages while the loop runs: a read would hand a parked loop its message
+// and let it go on, which would hide the leak.
+func waitLoopEnded(t *testing.T, s *Stream) {
+	t.Helper()
+	select {
+	case <-s.loopEnded:
+	case <-time.After(wait):
+		t.Fatal("the receive loop did not end")
+	}
+	waitClosed(t, messagesOf(t, s))
+}
+
+// waitEmpty waits until ch, a Messages channel, holds no message: the receive loop has taken them all.
+func waitEmpty(t *testing.T, ch <-chan []byte) {
+	t.Helper()
+	deadline := time.Now().Add(wait)
+	for len(ch) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the receive loop did not take the message")
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // A connection without unordered messages has none to deliver, so Messages closes at Close.
 func TestMessagesEndAtCloseWithoutUnorderedTransport(t *testing.T) {
 	kpA, kpB := newKeyPair(t), newKeyPair(t)

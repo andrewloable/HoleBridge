@@ -221,3 +221,104 @@ test('a closed port rejects promptly with HB-LOOKUP-TIMEOUT naming the refused c
   const reason = err ? err.reason || err.message : ''
   t.ok(/ECONNREFUSED/.test(reason), 'the reason names the refused connection')
 }))
+
+// Added by the IMPL task: the shared channel setup (lib/connect.js openSession) must report a host on another
+// protocol version over the LAN route as HB-VERSION-MISMATCH, as the direct route does.
+test('a LAN host on another protocol version is reported as HB-VERSION-MISMATCH', catchThrows(async (t) => {
+  const testnet = await createTestnet(5)
+  try {
+    const fake = await createFakeHost({ testnet, key: TEST_KEY, appKey, lan: true, version: 2 })
+    let session = null
+    try {
+      const err = await within(
+        hbRejection(async () => {
+          session = await connectLan({ address: LOOPBACK, port: fake.lanPort, key: TEST_KEY, appKey })
+        }),
+        'the connect to a host on protocol version 2'
+      )
+      t.is(err && err.code, 'HB-VERSION-MISMATCH', 'the code is HB-VERSION-MISMATCH')
+      t.is(session, null, 'no session is returned')
+    } finally {
+      if (session) session.destroy()
+      await fake.close()
+    }
+  } finally {
+    await testnet.destroy()
+  }
+}))
+
+// Added by the IMPL task: an invalid key is refused before any socket is opened. Port 1 is not listening, so
+// a dial first would reject with HB-LOOKUP-TIMEOUT instead of HB-KEY-INVALID.
+test('an invalid key rejects with HB-KEY-INVALID before any dial', catchThrows(async (t) => {
+  const err = await within(
+    hbRejection(() => connectLan({ address: LOOPBACK, port: 1, key: 'NOT-A-KEY', appKey })),
+    'the connect with an invalid key'
+  )
+  t.is(err && err.code, 'HB-KEY-INVALID', 'the code is HB-KEY-INVALID')
+}))
+
+// Added by the review fix (HoleBridge-hb5.2.5): a host that closes the TCP connection during the handshake must
+// reject the connect at once, not after the 60 s lookup timeout. The IK responder under another key fails on
+// message 1 and closes its socket, as a real host does when it destroys a connection that is not admitted.
+test('a host that closes the connection during the handshake is rejected promptly', catchThrows(async (t) => {
+  const host = await listenTcp((socket) => {
+    const stream = new NoiseSecretStream(false, socket, { keyPair: NoiseSecretStream.keyPair(), pattern: 'IK' })
+    stream.on('error', noop)
+  })
+  let session = null
+  try {
+    const err = await within(
+      hbRejection(async () => {
+        session = await connectLan({ address: LOOPBACK, port: host.port, key: TEST_KEY, appKey })
+      }),
+      'the connect to a host that closes during the handshake',
+      PROMPT
+    )
+    t.is(err && err.code, 'HB-LOOKUP-TIMEOUT', 'the code is HB-LOOKUP-TIMEOUT')
+    t.is(session, null, 'no session is returned')
+  } finally {
+    if (session) session.destroy()
+    await host.close()
+  }
+}))
+
+// Added by the FIX task (HoleBridge-hb5.2.6): an idle LAN session sends keepalive frames every 5 s, as the DHT
+// route does, so the host can tell a vanished phone from an idle one. connectLan takes no interval, so the test
+// watches the host side of the stream: an empty frame is a keepalive. The app sends one 5 s after its last write,
+// and KEEPALIVE_WAIT is the bound for the first one.
+const KEEPALIVE_WAIT = 8000
+
+test('an idle LAN session sends keepalive frames to the host', catchThrows(async (t) => {
+  const testnet = await createTestnet(5)
+  try {
+    let onKeepalive = null
+    const firstKeepalive = new Promise((resolve) => {
+      onKeepalive = resolve
+    })
+    const fake = await createFakeHost({
+      testnet,
+      key: TEST_KEY,
+      appKey,
+      lan: true,
+      onStream: (stream) => {
+        stream.on('data', (chunk) => {
+          if (chunk.byteLength === 0) onKeepalive()
+        })
+      }
+    })
+    let session = null
+    try {
+      session = await lanConnect(fake.lanPort)
+      const seen = await within(firstKeepalive, 'the first keepalive', KEEPALIVE_WAIT).then(
+        () => true,
+        () => false
+      )
+      t.ok(seen, 'the idle session sends a keepalive frame within 8 s')
+    } finally {
+      if (session) session.destroy()
+      await fake.close()
+    }
+  } finally {
+    await testnet.destroy()
+  }
+}))

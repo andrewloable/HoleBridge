@@ -418,3 +418,69 @@ subcommands; `internal/compact`, `internal/dhtrpc`, `internal/noise`, `internal/
 `noise-peer.js`, `udx-peer.js` (one stream, every mode), `udx-pair.js` (two-process JS baseline),
 `package.json` and `package-lock.json` (exact pins), `.gitignore` for node_modules). Rebuild and rerun
 with `sh spikes/pears-go/run-all.sh`.
+
+## UDX throughput, Go vs JS
+
+Question: how fast is pears/udx against udx-native on loopback, in each direction, and do 1 GiB
+transfers keep the same SHA-256 at both ends?
+
+**Verdict: PASS** for integrity and messages. Both 1 GiB transfers hashed the same at both ends, in
+both directions, and unordered messages arrived both ways. The throughput table is recorded below.
+It is loopback only, on a busy machine, so treat it as a rough figure.
+
+### Setup
+
+- Run date: 2026-10-09. Device: one Mac, Apple silicon (arm64), macOS 27.0.1. Go 1.25.0 with
+  CGO_ENABLED=0. Node v24.15.0.
+- JS peer: udx-native 1.21.3, pinned in `interop/js/package-lock.json`.
+- Machine load: noisy. Other agents were running tests during the runs; the load average was 3 to 6.
+- Networks: 127.0.0.1 only. No packet leaves the machine.
+
+### Steps run
+
+Four full runs of the UDX suite, all passing: one with `-count=1`, then one with `-count=3`. The
+table has one value per suite pass, so each cell is the median of 3 transfers, and 12 transfers
+per row in total.
+
+1. TestUDX_GoToJSEcho: Go sends 1 GiB to the JS echo peer. The peer hashes what it receives and
+   writes it back. Go hashes the echo. Both hashes must equal the hash of what Go sent.
+2. TestUDX_JSToGo: the JS side sends 1 GiB to Go. Go hashes what it receives, and the hashes must
+   match.
+3. TestUDX_Messages: unordered messages, Go to JS and JS to Go.
+4. TestUDX_Throughput: 100 MiB per run, 3 runs per row. The receiver's span, first byte to end of
+   stream.
+
+Command: `CGO_ENABLED=0 go test -count=3 -timeout 30m -v ./interop/ -run UDX` (about 2 minutes).
+
+### Measurements
+
+Mbit/s on 127.0.0.1. Medians per suite pass: the `-count=1` run, then the three iterations of the
+`-count=3` run.
+
+| Pair | Median per suite pass | Range of single transfers |
+|---|---|---|
+| Go to Go (one process) | 789, 774, 811, 795 | 656 to 849 |
+| JS to JS (one process, udx-native both ends) | 1121, 985, 967, 1157 | 896 to 1208 |
+| Go to JS (two processes) | 890, 876, 837, 829 | 783 to 940 |
+| JS to Go (two processes) | 1170, 1112, 1154, 1186 | 1046 to 1195 |
+
+### What the numbers mean
+
+- In every pass, the Go sender to a JS receiver is slower than the JS sender to a Go receiver
+  (829 to 890 against 1112 to 1186).
+- In every pass, Go to Go is slower than JS to JS (at most 811 against at least 967).
+- Loopback has no link limit, so these figures measure the protocol code and the host CPU, not a
+  network.
+
+### Caveats
+
+- Loopback only, one Mac, and a busy machine. Single transfers vary by up to about 25 percent (Go
+  to Go ranged from 656 to 849). Do not read one run as a benchmark.
+- The runs were made after the fix for HoleBridge-85m.4.19 (a Go sender that stopped moving data
+  in a 100 MiB transfer).
+- The throughput figure is the receiver's span, so it excludes process start-up.
+
+### Files
+
+`interop/udx_test.go` (the four tests above), `interop/js/udx-peer.js` (the JS peer). The
+throughput table is printed by TestUDX_Throughput; it is copied here by hand.

@@ -33,3 +33,6 @@ for rel in $(cd "$app_dir/engine/dist" && find node_modules -name '*.bare' -type
 done
 count=$(wc -l < "$addons/addons.txt" | tr -d ' ')
 echo "copied engine bundle and $count native addon(s) to app/assets"
+
+# The license texts of the engine packages, the native addons and the Bare runtime (app/assets/licenses).
+"$app_dir/tool/collect_app_licenses.sh"

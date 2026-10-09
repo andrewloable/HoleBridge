@@ -73,6 +73,13 @@ type pending struct {
 // reply, or nil for no reply; the IO sets the reply's Tid and To, and a Token when it has none.
 // NewIO starts reading conn at once. Close stops it.
 func NewIO(conn PacketConn, handler func(req *Request, from *net.UDPAddr) *Response) *IO {
+	io := buildIO(conn, handler)
+	go io.readLoop()
+	return io
+}
+
+// buildIO returns an IO on conn with its token secrets and tids set, and its secrets rotating. It does not read conn.
+func buildIO(conn PacketConn, handler func(req *Request, from *net.UDPAddr) *Response) *IO {
 	io := &IO{
 		conn:     conn,
 		handler:  handler,
@@ -84,7 +91,6 @@ func NewIO(conn PacketConn, handler func(req *Request, from *net.UDPAddr) *Respo
 	var tid [2]byte
 	rand.Read(tid[:])
 	io.nextTid = binary.LittleEndian.Uint16(tid[:])
-	go io.readLoop()
 	go io.rotateLoop()
 	return io
 }
@@ -278,6 +284,30 @@ func (io *IO) setPunch(handler func(from *net.UDPAddr)) {
 	io.mu.Lock()
 	defer io.mu.Unlock()
 	io.punch = handler
+}
+
+// NewFedIO returns an IO on conn that does not read it. Its requests go out on conn, as NewIO's do, and their replies
+// come back to the owner of conn, which passes each datagram it reads to Feed. The owner takes the datagrams it does not
+// feed (the holepunch datagrams of a birthday socket, for one) for itself. The IO has no handler, so it answers no
+// requests.
+func NewFedIO(conn PacketConn) *IO {
+	return buildIO(conn, nil)
+}
+
+// Feed passes a datagram that the owner of a fed IO read from its conn to the IO, as NewIO's read loop would.
+func (io *IO) Feed(b []byte, from *net.UDPAddr) {
+	io.onDatagram(b, from)
+}
+
+// Observed sends a PING from the IO's conn to to, and returns the address that to reports for the conn: the 'to' field
+// of its reply. It is one NAT sample, as Node.Observed takes them from the node's socket. It does not change the node's
+// table or NAT state, since a birthday socket is not the node's socket.
+func (io *IO) Observed(ctx context.Context, to *net.UDPAddr) (Addr, error) {
+	resp, err := io.requestRetry(ctx, to, Request{Internal: true, Command: cmdPing}, requestRetries, nil)
+	if err != nil {
+		return Addr{}, err
+	}
+	return resp.To, nil
 }
 
 // isClosed reports whether Close has been called.

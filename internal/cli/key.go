@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"strings"
 
 	"github.com/andrewloable/HoleBridge/internal/config"
 	"github.com/andrewloable/HoleBridge/internal/errs"
@@ -63,16 +64,29 @@ func showKey(dir string, env Env) error {
 			return err
 		}
 	}
-	link := links.KeyLink(links.DefaultBase, c.Key, appKey)
-	code, err := qr.Encode(link, qr.M)
+	block, err := keyBlock(c.Key, appKey)
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(env.Stdout, "Key: %s\n", keys.Format(c.Key))
-	fmt.Fprint(env.Stdout, code.Terminal(2))
-	fmt.Fprintln(env.Stdout, "Scan with your phone, or open:")
-	fmt.Fprintln(env.Stdout, link)
+	fmt.Fprint(env.Stdout, block)
 	return nil
+}
+
+// keyBlock returns the key lines of a host's banner and of holebridge key: the Key line with its dashes, the QR
+// code of the key link, and the link. The link carries the application key, so the block is a secret: it is
+// printed only where docs/cli.md shows it.
+func keyBlock(hostKey string, appKey [32]byte) (string, error) {
+	link := links.KeyLink(links.DefaultBase, hostKey, appKey)
+	code, err := qr.Encode(link, qr.M)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Key: %s\n", keys.Format(hostKey))
+	b.WriteString(code.Terminal(2))
+	fmt.Fprintln(&b, "Scan with your phone, or open:")
+	fmt.Fprintln(&b, link)
+	return b.String(), nil
 }
 
 // rotateKey replaces the host key and prints no key; holebridge key shows the new one. On a running

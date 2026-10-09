@@ -52,12 +52,14 @@ function handshakeEntry(service) {
  *   127.0.0.1. The listener runs the Noise handshake (IK) under the host key pair, and destroys any remote
  *   key but the client key pair, as the DHT firewall does.
  * - version: protocol version in the handshake, default 1. Another value tests a version mismatch.
+ * - onStream: null (default), or a function that receives each admitted app stream, from the DHT or the
+ *   LAN, before the channel opens. A test writes raw frames to it, below the host's own mux.
  *
  * The result has publicKey (the host public key to dial), client (the client key pair the firewall
  * admits, for the test to dial with), lanPort (the LAN listener's TCP port, or null unless lan is true)
  * and close(), which stops the servers, their sockets and its DHT node. Nothing here logs keys.
  */
-async function createFakeHost({ testnet, key, appKey, services = [], flags = 0, lan = false, version = 1 }) {
+async function createFakeHost({ testnet, key, appKey, services = [], flags = 0, lan = false, version = 1, onStream = null }) {
   const pairs = await keys.derive(keys.normalize(key), appKey)
   const byName = new Map(services.map((s) => [s.name, s]))
   const budget = new Budget(256 * MIB)
@@ -108,6 +110,7 @@ async function createFakeHost({ testnet, key, appKey, services = [], flags = 0, 
   const serve = (socket) => {
     conns.add(socket)
     socket.on('error', noop)
+    if (onStream) onStream(socket)
     const mux = Protomux.from(socket)
     let session = null
     let queue = Promise.resolve()

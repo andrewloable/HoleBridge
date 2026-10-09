@@ -31,7 +31,7 @@ func (st *Stream) SendMessage(b []byte) error {
 	if len(b) > maxMessage {
 		return errMessageTooLarge
 	}
-	return st.send(FlagMessage, st.nextSeq, b)
+	return st.send(FlagMessage, st.seq, b)
 }
 
 // Messages returns the channel that carries the messages the peer sends with SendMessage, as they

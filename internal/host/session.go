@@ -30,28 +30,44 @@ const (
 // sends them unordered on its UDX connection when the app takes unordered datagrams, and as message 10 when it
 // does not. When the transport dies the session detaches and its streams wait for a reattach; when the host
 // ends the session itself it closes them. It returns nil when the session ends normally, and the reason when the
-// host ended it.
-func (h *Host) serve(conn *hyperdht.Conn, lan bool) error {
+// host ended it. relayed is true for a DHT stream claimed through a relay pairing (hyperdht.AcceptedConn.Relayed); its
+// session is listed with the route relay.
+func (h *Host) serve(conn *hyperdht.Conn, lan, relayed bool) error {
 	defer h.untrack(conn)
 	defer conn.Destroy() // the transport goes whole: a peer that ignores END must not keep it
 
-	l := &link{h: h, done: make(chan struct{})}
-	h.addLink(l)
-	defer h.removeLink(l)
+	route := routeDirect
+	switch {
+	case lan:
+		route = routeLAN
+	case relayed:
+		route = routeRelay
+	}
+	l := &link{h: h, routeName: route, done: make(chan struct{})}
 	l.sess = mux.NewSession(mux.RoleHost, l, mux.Config{
 		Window:     uint64(h.limits.ReceiveWindowPerStream),
 		MaxStreams: h.limits.StreamsPerSession,
 		Limits:     h.streams,
 		Clock:      h.clock,
-	}, h.budget, h.accept)
+	}, h.budget, func(name string) mux.AcceptResult { return h.accept(name, &l.meter) })
+	// The link is registered once its session is set: a stream's count reads the session of each registered link.
+	h.addLink(l)
+	defer h.removeLink(l)
 	// The app's handshake decides whether the session binds to the resume table (onOpen). Its replies go unordered
 	// on a DHT connection whose app takes unordered datagrams, and otherwise as message 10 through the session's
-	// ordered queue (docs/architecture.md, UDP services).
-	q := newReplyQueue(h.limits.OrderedDatagramQueue, func(d protocol.Datagram) { _ = l.Send(d) })
+	// ordered queue (docs/architecture.md, UDP services). The meter counts a reply once it is sent.
+	q := newReplyQueue(h.limits.OrderedDatagramQueue, func(d protocol.Datagram) {
+		if l.Send(d) == nil {
+			l.meter.out.Add(uint64(len(d.Payload)))
+		}
+	})
 	defer q.close()
 	l.udpSend = func(flow uint64, payload []byte) {
 		if !lan && l.datagrams.Load() {
-			_ = conn.Send(protocol.EncodeUnordered(protocol.Datagram{Flow: flow, Payload: payload})) // a lost reply is as on any UDP path
+			// a lost reply is as on any UDP path
+			if conn.Send(protocol.EncodeUnordered(protocol.Datagram{Flow: flow, Payload: payload})) == nil {
+				l.meter.out.Add(uint64(len(payload)))
+			}
 			return
 		}
 		q.offer(flow, payload)
@@ -90,11 +106,13 @@ func (h *Host) serve(conn *hyperdht.Conn, lan bool) error {
 // link is the host side of one connection: its protomux channel and its mux session. It is the mux.Sender
 // of the session.
 type link struct {
-	h    *Host
-	ch   *protomux.Channel
-	msgs []*protomux.Message // one per message index, in index order
-	sess *mux.Session
-	done chan struct{} // closed when the connection ends
+	h         *Host
+	routeName string // routeLAN, routeDirect or routeRelay: the route the session runs on, for Sessions
+	meter     meter  // the streams this session owns and their bytes, for Sessions; a resumed stream moves here (streamMeter)
+	ch        *protomux.Channel
+	msgs      []*protomux.Message // one per message index, in index order
+	sess      *mux.Session
+	done      chan struct{} // closed when the connection ends
 	// udp is the flow table of each udp service, by name. udpMu guards it, since a reload adds a table while the
 	// session runs. udpShare is the flow cap the tables share, and udpSend carries each reply.
 	udpMu     sync.RWMutex
@@ -242,15 +260,18 @@ func (l *link) receive(index int) func([]byte) {
 // route hands a decoded message to the UDP flows, for flow (9) and datagram (10), and any other to the
 // session. A datagram also comes here when it arrived unordered on a DHT stream. A flow to a service that is
 // not a udp service gets no reply. Flow ids are unique per session, so a datagram reaches the one table that
-// holds its flow; the others drop it.
+// holds its flow; the others drop it. A reattach hands the streams it takes over to this link's meter, after the
+// session has them (Host.followReattach).
 func (l *link) route(msg any) error {
 	switch m := msg.(type) {
 	case protocol.Flow:
+		l.meter.in.Add(uint64(len(m.Payload)))
 		if t := l.table(m.Service); t != nil {
 			l.startFlow(t, m)
 		}
 		return nil
 	case protocol.Datagram:
+		l.meter.in.Add(uint64(len(m.Payload)))
 		l.udpMu.RLock()
 		defer l.udpMu.RUnlock()
 		for _, t := range l.udp {
@@ -258,7 +279,13 @@ func (l *link) route(msg any) error {
 		}
 		return nil
 	}
-	return l.sess.Receive(msg)
+	err := l.sess.Receive(msg)
+	if _, ok := msg.(protocol.Reattach); ok {
+		// The reattach may have moved streams into this session even when its answer then fails, so they follow it
+		// either way.
+		l.h.followReattach(l)
+	}
+	return err
 }
 
 // startFlow takes a flow message on the session's message path. A flow that is open takes the payload here, in
@@ -370,8 +397,9 @@ func (w *watch) Close() error {
 // target's EOF ends the copy to the app. An error in either copy closes the target, so the other copy ends
 // too. When the stream fails (its session ends, or its grace period does), the target is closed even if it is
 // silent, since the copy from the target would otherwise wait for it for good. With an idle time, a stream that
-// moves no bytes either way for that long is closed (docs/cli.md, services.<name>.idle).
-func forward(st *mux.Stream, target net.Conn, idle time.Duration) {
+// moves no bytes either way for that long is closed (docs/cli.md, services.<name>.idle). The bytes each way are
+// counted on the stream's meter as they move: sm.cur is the meter of the link that owns the stream now.
+func forward(st *mux.Stream, target net.Conn, idle time.Duration, sm *streamMeter) {
 	quiet := newIdleTimer(idle, func() {
 		st.Close()
 		target.Close()
@@ -388,7 +416,7 @@ func forward(st *mux.Stream, target net.Conn, idle time.Duration) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		if _, err := io.Copy(target, touched{st, quiet}); err != nil {
+		if _, err := io.Copy(target, touched{st, quiet, sm, true}); err != nil {
 			target.Close()
 			return
 		}
@@ -396,7 +424,7 @@ func forward(st *mux.Stream, target net.Conn, idle time.Duration) {
 	}()
 	go func() {
 		defer wg.Done()
-		io.Copy(st, touched{target, quiet})
+		io.Copy(st, touched{target, quiet, sm, false})
 		st.CloseWrite()
 	}()
 	wg.Wait()
@@ -432,17 +460,26 @@ func (i *idleTimer) stop() {
 	}
 }
 
-// touched is a reader whose bytes count as activity on the idle timer. Every byte a copy moves is read from
-// one side, so the reads of both sides cover both directions.
+// touched is a reader whose bytes count as activity on the idle timer, and are added to the stream's count: the
+// bytes from the app when in, else the bytes to it. Every byte a copy moves is read from one side, so the reads of
+// both sides cover both directions. The count is on the meter the stream owns when the bytes are read, which is
+// one atomic pointer load, and no lock.
 type touched struct {
 	r    io.Reader
 	idle *idleTimer
+	sm   *streamMeter
+	in   bool
 }
 
 func (t touched) Read(p []byte) (int, error) {
 	n, err := t.r.Read(p)
 	if n > 0 {
 		t.idle.touch()
+		if m := t.sm.cur.Load(); t.in {
+			m.in.Add(uint64(n))
+		} else {
+			m.out.Add(uint64(n))
+		}
 	}
 	return n, err
 }

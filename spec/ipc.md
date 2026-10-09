@@ -35,6 +35,8 @@ application key), `array of T` (count, then the items), and `struct` (its fields
 and `bind` are strings with the values listed. Addresses are IPv4 strings, as in the wire handshake.
 Empty values mean none: `""` for a string, `[]` for an array, `0` for a port.
 
+A **service entry** is a struct of `name` (string) and `kind` (uint), in that order. `kind` uses the handshake's numbering ([service kinds](../docs/architecture.md#service-kinds)): 0 unknown, 1 https, 2 http, 3 tcp, 4 udp. The engine forwards `kind` unchanged from the host's handshake. A kind the engine does not know maps to 0.
+
 ## Reply
 
 Every request gets one reply, type 0, with the request's id. Only the connect reply fills `route`,
@@ -46,7 +48,7 @@ Every request gets one reply, type 0, with the request's id. Only the connect re
 | `code` | string | an `HB-` code from [errors.json](errors.json); empty when `ok` |
 | `detail` | string | text for a person; see the rules for strings below |
 | `route` | string | connect, when `ok`: `lan`, `direct` or `relay`, the route the session came up on |
-| `services` | array of string | connect, when `ok`: the service names the host shares, from its handshake |
+| `services` | array of service entry | connect, when `ok`: the services the host shares, from its handshake, each with its kind |
 | `ports` | array of struct of `service` (string) and `port` (uint) | connect, when `ok`: the local port bound for each service |
 
 ## Requests (Dart to engine)
@@ -76,8 +78,9 @@ Every request gets one reply, type 0, with the request's id. Only the connect re
 - `status`, and any other request naming a host that is not connected, replies `ok` false with `HB-USAGE`.
 - `relay`: the relay key. An empty `key` means no relay, and `appKey` is then ignored (send 32 zero bytes).
 - `handoff.send`: `link` is the TV's link from `handoff.code`. `name`, `key` and `appKey` are the host the user picked.
-- `vpn.start`: see point 7 for `port` and `dnsUpstream`. `address` is the service's VPN address, in the
-  range 198.18.0.0/16 ([architecture](../docs/architecture.md#vpn-mode-android-and-ios)).
+- `vpn.start`: `port` is the service's local listener port, kept for the engine's bookkeeping; the front routes
+  by address, not by this port (point 7). `address` is the service's VPN address, in the range 198.18.0.0/16
+  ([architecture](../docs/architecture.md#vpn-mode-android-and-ios)). `dnsUpstream` is in point 7.
 
 ## Events (engine to Dart)
 
@@ -87,7 +90,7 @@ Every request gets one reply, type 0, with the request's id. Only the connect re
 | 101 | `session` | `host` string; `up` bool | when a session comes up or goes down |
 | 102 | `status` | `host` string; `route` string (as above, or `""` when no session is up and no search runs); `sessions` uint; `streams` uint; `flows` uint; `bytesIn` uint; `bytesOut` uint; `nat` struct of `host` (string, public IPv4 address, empty when unknown), `port` (uint), `firewalled` and `randomized` (bool) | after a status request |
 | 103 | `vpn` | `port` uint; `addresses` array of struct of `host`, `service`, `address` and `name` (strings; `name` is `<service>.<host>.internal`) | after `vpn.start` |
-| 104 | `services` | `host` string; `list` array of string (service names); `ports` array of struct of `service` (string) and `port` (uint) | when a handshake completes, and when a services message arrives (M3) |
+| 104 | `services` | `host` string; `list` array of service entry (name and kind); `ports` array of struct of `service` (string) and `port` (uint) | when a handshake completes, and when a services message arrives (M3) |
 | 105 | `reject` | `host` string; `service` string; `code` string (an `HB-` code); `reason` string | when the host rejects a stream |
 | 106 | `error` | `code` string (an `HB-` code); `detail` string | when an error with a code happens |
 | 107 | `handoff.code` | `link` string | after `handoff.listen` |
@@ -148,16 +151,24 @@ the docs where they say anything, and where they are silent, take the minimal op
    engine cannot take the application key from an earlier connect. `relay` therefore carries `appKey`.
    Decided (orchestrator, 2026-10-08); the owner may revise.
 
-7. **VPN ports and DNS.** In `vpn.start`, `port` is the engine's local listener for that service, the port the
-   network stack hands the service's streams and flows to (the port from `ports` or the `services` event).
-   Dart assigns each service's `address` from 198.18.0.0/16 and sends it. `dnsUpstream` is the device's DNS
-   servers, which Dart reads from the platform and sends, because the engine cannot read them; an empty list means
-   the engine forwards nothing and answers only the service names. In the `vpn` event, `port` is the local UDP port
-   on 127.0.0.1 where the engine answers DNS for those names and forwards other queries. The engine picks it (an
-   OS-chosen port), and the network stack sends DNS packets there. Each `addresses` entry echoes the address Dart
-   sent, with `name` `<service>.<host>.internal`. The host label is the host name lowercased, each run of characters
-   other than a to z and 0 to 9 replaced by one dash, with dashes trimmed at the ends
-   ([architecture](../docs/architecture.md#vpn-mode-android-and-ios)). Decided (orchestrator, 2026-10-08); the owner may revise.
+7. **VPN ports and DNS.** The network stack does not reach each service through its own listener. It
+   connects to the engine's one local SOCKS5 front. In `vpn.start`, `port` is the service's local listener port,
+   kept for the engine's bookkeeping; the front routes by address, not by this port. Dart assigns each service's
+   `address` from 198.18.0.0/16 and sends it. `dnsUpstream` is the device's DNS servers, which Dart reads from the
+   platform and sends, because the engine cannot read them. In the `vpn` event, `port` is the TCP port on 127.0.0.1
+   of the front. The front speaks SOCKS5 (RFC 1928) with no authentication, for CONNECT and UDP ASSOCIATE. The engine
+   picks the port (an OS-chosen port), and the stack connects to it. The UDP ASSOCIATE reply gives BND.ADDR
+   127.0.0.1 and the port of the front's UDP relay, which the stack sends its datagrams to.
+   The front routes by destination address. CONNECT to a service's address, on any port, opens a stream to that
+   service. UDP to a service's address uses that service's flow. UDP to 198.18.0.1:53 is DNS, so the DNS queries
+   arrive through UDP ASSOCIATE. The front answers a service name with its address, and forwards other queries to
+   the `dnsUpstream` servers, asking each in turn. An empty list forwards nothing, so other names get SERVFAIL, as
+   they do when no upstream answers. 198.18.0.1 is never given to a service. Anything else, including an address
+   no service has, is refused with the SOCKS reply "connection not allowed".
+   Each `addresses` entry echoes the address Dart sent, with `name` `<service>.<host>.internal`. The host label is
+   the host name lowercased, each run of characters other than a to z and 0 to 9 replaced by one dash, with dashes
+   trimmed at the ends ([architecture](../docs/architecture.md#vpn-mode-android-and-ios)).
+   Decided (orchestrator, 2026-10-08; revised 2026-10-09 for one SOCKS5 front); the owner may revise.
 
 8. **Reject codes.** Wire reject codes map to catalog codes: 1 `HB-UNKNOWN-SERVICE`, 2 `HB-LIMIT-REACHED`,
    3 `HB-TARGET-REFUSED`, 4 `HB-TARGET-TIMEOUT` (all in errors.json). Any other wire code is malformed input

@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -99,7 +100,11 @@ func TestGeneratedFilesAndNodeModulesAreIgnored(t *testing.T) {
 }
 
 func TestCommandExitsOneOnFindingsAndZeroOnNone(t *testing.T) {
-	bin := filepath.Join(t.TempDir(), "check")
+	name := "check"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	bin := filepath.Join(t.TempDir(), name)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	build := exec.CommandContext(ctx, "go", "build", "-o", bin, "./internal/errs/check")

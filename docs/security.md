@@ -193,6 +193,14 @@ cannot be replayed into another session.
 | Devices on the TV's LAN during a handoff | A TCP port open on the TV for up to 5 minutes, and one sealed box | The host or the application key: only the TV can open the box |
 | Someone who learns the host public key only | That a host exists; they can attempt connections | Anything else. The host turns them away without the client key pair. |
 
+On the LAN TCP route, a connection proves the client key with its first message that decrypts under the
+session keys. Keepalives decrypt but do not prove. A replayed handshake message 1 can finish the stream
+header exchange, because that exchange is not authenticated, but it cannot send such a message. It stays
+unproven and holds one of the unauthenticated LAN slots until the 5 s handshake deadline closes it and
+counts it as a refusal, with no key in the log. Until it is proven, a connection may send no frame that
+names more than 65535 bytes: a longer length prefix closes it at once, before any payload is read, and
+counts as a refusal the same way.
+
 ## Rules for implementers
 
 1. **Never log** a key, the application key, derived secrets, PINs, resume tokens, payload bytes or

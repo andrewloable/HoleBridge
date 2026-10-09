@@ -316,6 +316,27 @@ class Session {
     }
   }
 
+  // enableResume makes this session keep the bytes its streams send until the peer acknowledges them, so that
+  // a dropped transport stalls its streams instead of closing them (docs/architecture.md, "Streams survive a
+  // reconnect and a route change"). The connection calls it when the handshake carries FLAG.resume, before the
+  // session opens streams.
+  enableResume() {
+    throw new Error('not implemented')
+  }
+
+  // detach is called when the transport dies. A resumable session keeps its streams: they stall, their Stream
+  // objects stay open and they wait for adopt. A session without resume closes its streams at once.
+  detach() {
+    throw new Error('not implemented')
+  }
+
+  // adopt makes this new app session take over the streams that prev detached. Each one is sent a reattach with
+  // its token, the bytes received and its limit, and this session ignores the data and window of a stream until
+  // reattached arrives. The Stream objects stay the same.
+  adopt(prev) {
+    throw new Error('not implemented')
+  }
+
   // takeSlot takes a stream slot: one of the session's maxStreams and one of the shared counter. It
   // reports false when either is full.
   takeSlot() {

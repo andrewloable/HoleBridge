@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -46,6 +47,9 @@ type Env struct {
 	Stdout, Stderr io.Writer
 	Getenv         func(string) string
 	Now            func() time.Time
+	// LogLevel is the level of the log a command writes to Stderr. Run sets it from --log-level. Its zero value is
+	// slog.LevelInfo, so an Env that sets nothing logs at info.
+	LogLevel slog.Level
 }
 
 // Command runs one subcommand. args are the words after the command name, with the global options
@@ -62,6 +66,7 @@ var commands = map[string]Command{}
 // globals holds the global options found on the command line.
 type globals struct {
 	configDir     string
+	logLevel      slog.Level // info when no --log-level is given
 	version, help bool
 }
 
@@ -90,6 +95,8 @@ func Run(args []string, env Env) int {
 	// config.Dir returns "" with its error when no directory can be found. Run does not stop here,
 	// so that a command which needs no directory still runs; see Command.
 	configDir, _ := config.Dir(g.configDir, env.Getenv)
+	// env is a copy, so setting its level here does not change the caller's Env.
+	env.LogLevel = g.logLevel
 	if err := c(cargs, env, configDir); err != nil {
 		return fail(env, err)
 	}
@@ -98,7 +105,7 @@ func Run(args []string, env Env) int {
 
 // parseGlobals takes the global options out of args, before or after the command, and returns them
 // with the rest of the words. Other options pass through, so a command keeps its own flags. The
-// log level is checked here; no command logs yet, so it is not passed on.
+// log level is checked and stored in the globals; Run passes it on in Env.LogLevel.
 func parseGlobals(args []string) (globals, []string, error) {
 	var g globals
 	var rest []string
@@ -130,8 +137,12 @@ func parseGlobals(args []string) (globals, []string, error) {
 				return g, nil, errs.E("HB-USAGE", "--config needs a directory, see holebridge --help", nil)
 			}
 			g.configDir = value
-		} else if _, err := log.ParseLevel(value); err != nil {
-			return g, nil, errs.E("HB-USAGE", "--log-level must be error, warn, info or debug", nil)
+		} else {
+			lvl, err := log.ParseLevel(value)
+			if err != nil {
+				return g, nil, errs.E("HB-USAGE", "--log-level must be error, warn, info or debug", nil)
+			}
+			g.logLevel = lvl
 		}
 	}
 	return g, rest, nil

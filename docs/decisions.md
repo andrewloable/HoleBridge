@@ -448,9 +448,10 @@ provider's servers ([architecture.md](architecture.md#vpn-mode-android-and-ios))
   its `origins`. The app answers DNS for those names; every other query goes to the network's
   normal DNS.
 - **Packets become streams on the device.** A small user-space network stack in C turns packets
-  back into TCP connections and UDP flows and hands them to the engine's local listeners. They
-  cross the session as ordinary streams and flows, so the host, protocol v1, resume and "forward
-  only to configured targets" are unchanged.
+  back into TCP connections and UDP flows and hands them to the engine's one local SOCKS5 front,
+  which maps each destination address to a host and service. They cross the session as ordinary
+  streams and flows, so the host, protocol v1, resume and "forward only to configured targets" are
+  unchanged.
 - **Still a tunnel, not a mesh (D30).** Only the host's configured services get addresses. No
   device gets an address anyone else can reach, nothing is routed to a subnet, and nothing can
   reach the phone.

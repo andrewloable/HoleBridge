@@ -1,11 +1,15 @@
 package hyperdht
 
 import (
+	"context"
 	"net"
 	"net/netip"
 	"testing"
 	"time"
 
+	"github.com/andrewloable/HoleBridge/pears/dhtrpc"
+	"github.com/andrewloable/HoleBridge/pears/noise"
+	"github.com/andrewloable/HoleBridge/pears/secretstream"
 	"github.com/andrewloable/HoleBridge/pears/udx"
 )
 
@@ -261,4 +265,140 @@ func TestPunchedConnOwnsItsBirthdaySocket(t *testing.T) {
 	} else {
 		c.Close()
 	}
+}
+
+// streamOutcome is the answer to a handshake that named the client's own UDX stream: the server's reply payload, the
+// secret stream keys of the handshake, the server's key and the holepunch secret.
+type streamOutcome struct {
+	payload   HandshakePayload
+	keys      secretstream.Keys
+	serverKey [32]byte
+	secret    [32]byte
+}
+
+// streamHandshake sends a raw handshake from kp to the server host through the node at relay, as a connect does, and
+// names stream as the client's UDX stream. The client's firewall is randomizing, as the client's probes say. ok is
+// false when no answer arrives that decodes as a handshake reply.
+func streamHandshake(t *testing.T, relay *net.UDPAddr, host [32]byte, kp noise.KeyPair, stream uint32) (streamOutcome, bool) {
+	t.Helper()
+	prologue := dhtNamespace(cmdPeerHandshake)
+	payload, err := EncodeNoisePayload(NoisePayload{
+		Firewall:     firewallRandom,
+		UDX:          &UDXInfo{Version: 1, ID: uint64(stream)},
+		SecretStream: &SecretStreamInfo{Version: 1},
+	})
+	must(t, err)
+	hs := noise.NewInitiator(kp, host, prologue[:])
+	msg1, err := hs.Send(payload)
+	must(t, err)
+	value, err := EncodeHandshake(Handshake{Mode: handshakeFromClient, Noise: msg1})
+	must(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), handshakeWait)
+	defer cancel()
+	target := hashKey(host)
+	resp, err := newClient(t).Request(ctx, relay, dhtrpc.Request{Command: cmdPeerHandshake, Target: target[:], Value: value})
+	if err != nil || resp.Error != 0 || len(resp.Value) == 0 {
+		return streamOutcome{}, false
+	}
+	ans, err := DecodeHandshake(resp.Value)
+	if err != nil || ans.Mode != handshakeReply || len(ans.Noise) == 0 {
+		return streamOutcome{}, false
+	}
+	body, err := hs.Recv(ans.Noise)
+	if err != nil || !hs.Complete() {
+		return streamOutcome{}, false
+	}
+	p, err := DecodeNoisePayload(body)
+	if err != nil {
+		return streamOutcome{}, false
+	}
+	_, _, hash, serverKey := hs.Result()
+	return streamOutcome{payload: p, keys: keysOf(hs), serverKey: serverKey, secret: holepunchSecret(t, hash)}, true
+}
+
+// Test case 6: a connect of a randomizing client, whose punch starts from a birthday socket, connects through the
+// server's puncher, and data flows both ways. The handshake reaches the server through a holder, so it is relayed, and
+// the address the holder names for the client is not the one the client's birthday socket punches from. The server
+// must not claim the stream at admission: upstream claims a relayed handshake at admission only when its client is
+// open, and otherwise waits for the puncher or the relay pairing (lib/server.js _addHandshake). A stream claimed at the
+// holder's address points at an address the client's punch does not use, and the header exchange never completes. The client is a DHT node whose NAT randomizes: three observers see three
+// ports, so its puncher opens birthday sockets toward the server (birthdayProbes). Loopback has no NAT, so the test
+// plays the client's side by hand: its probe, its puncher, and the claim of its own stream on the birthday socket it
+// connected on (punchedConn), with the secret stream run over that stream.
+func TestRandomizedClientConnectsThroughBirthdaySocket(t *testing.T) {
+	tn := startTestnet(t, 10)
+	server, client := tn.Nodes[0], tn.Nodes[9]
+	host := testKeyPair(3)
+	kp := testKeyPair(5)
+	srv := newServer(t, server, ServerOptions{})
+	listenOn(t, srv, host)
+	accepted := acceptNext(srv)
+
+	// The client's stream is made on its node's socket, and the handshake names its id, as a connect's handshake does.
+	st := client.newStream()
+	relay := holderOtherThanServer(t, tn, host.Public, nodeAddr(t, server))
+	ans, ok := streamHandshake(t, relay, host.Public, kp, st.ID())
+	if !ok {
+		t.Fatal("the handshake through a holder got no answer")
+	}
+	info := ans.payload.Holepunch
+	if info == nil || len(info.Relays) == 0 {
+		t.Fatal("the handshake reply names no holepunch id and relays, so there is no punch to make")
+	}
+
+	// The probe tells the server that the client's NAT randomizes and gives its host (a randomizing NAT reports no
+	// port). The server's answer carries its own NAT state, and names the server's address for the client's punch.
+	clientHost := addressOf(nodeAddr(t, client)).Host
+	reply := probeServer(t, info, host.Public, ans.secret, HolepunchPayload{
+		Firewall:  firewallRandom,
+		Addresses: []Address{{Host: clientHost}},
+	})
+	serverNode := addressOf(nodeAddr(t, server))
+
+	// The client's puncher: its NAT samples say randomized, and the server is consistent and verified (its token echoed).
+	connects := make(chan connectEvent, 4)
+	p := newPuncher(t, punchConfig{
+		Pool:      client.punchPool(),
+		Initiator: true,
+		OnConnect: func(s punchSocket, r *net.UDPAddr) { connects <- connectEvent{s, r} },
+		Timing:    punchTiming{BirthdaySockets: 4},
+	})
+	for i, o := range []Address{addr("203.0.113.11", 6881), addr("203.0.113.12", 6881), addr("203.0.113.13", 6881)} {
+		p.observe(Address{Host: netip.MustParseAddr("198.51.100.7"), Port: uint16(40000 + i)}, o)
+	}
+	callStub(t, "updateRemote", func() {
+		p.updateRemote(reply.Firewall, true, []Address{serverNode}, serverNode.Host)
+	})
+	var started bool
+	var err error
+	callStub(t, "punch", func() { started, err = p.punch() })
+	if err != nil || !started {
+		t.Fatalf("punch = %v, %v, want a birthday punch started", started, err)
+	}
+
+	var ev connectEvent
+	select {
+	case ev = <-connects:
+	case <-time.After(punchWait):
+		t.Fatal("the birthday punch did not connect within the punch wait")
+	}
+	if addressOf(ev.remote) != serverNode {
+		t.Errorf("the punch connected to %v, want the server's node %v", ev.remote, serverNode)
+	}
+	own := birthdayOf(ev.sock)
+	if own == nil {
+		t.Fatalf("the punch connected on the node's socket %v, want a birthday socket", ev.sock.Local())
+	}
+
+	// The client claims its stream on the birthday socket the punch connected on, and runs the secret stream over it.
+	conn, err := punchedConn(st, own, uint32(ans.payload.UDX.ID), ev.remote)
+	must(t, err)
+	c := secretstream.Resume(conn, true, secretstream.Options{RemotePublicKey: &host.Public}, ans.keys)
+	t.Cleanup(func() { c.Close() })
+	hctx, hcancel := context.WithTimeout(context.Background(), headerExchangeWait)
+	defer hcancel()
+	must(t, c.Handshake(hctx))
+	s := awaitAccept(t, accepted, readWait)
+	exchange(t, c, s)
 }

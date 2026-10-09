@@ -1,0 +1,24 @@
+hev-socks5-tunnel, the VPN mode network stack (MIT)
+
+Upstream:    https://github.com/heiher/hev-socks5-tunnel
+Release:     2.18.0
+Commit:      d9dca26c7ad0e494492244f0309e80ee583e739e
+Vendored:    2026-10-09, by copying the source tree at that commit. No .git directories.
+
+Submodules, each copied at the commit the release pins:
+  src/core                       hev-socks5-core     162dd996299fc2d2bff2dd63728f8a2cd71ed31a  MIT          https://github.com/heiher/hev-socks5-core
+  third-part/hev-task-system     hev-task-system     328f35d903221b51811b3d02b277d665dfbdc75f  MIT          https://github.com/heiher/hev-task-system
+  third-part/lwip                lwip (heiher fork)  e22c9d2873cd5a8aade9deb2e518b75dab05170e  BSD-3-Clause https://github.com/heiher/lwip
+  third-part/yaml                yaml (hev branch)   efa36117a8646d26d12b58e05bac472d7854a70d  MIT          https://github.com/heiher/yaml
+
+Each component's LICENSE file (License for yaml) is in its own directory.
+
+Not copied: the top-level include/ (two symlinks to files under src/), third-part/wintun (Windows
+only, not built for Android), .github, tests, apps, and upstream build files (Makefile, build.mk,
+Android.mk, Application.mk, configs.mk, and the others). The build is app/native/CMakeLists.txt.
+src/hev-jni.c is copied but not built: it has hev's own JNI names for hev.htproxy.TProxyService.
+
+Local changes: one addition, third-part/yaml/LICENSE-libyaml, the License text from yaml/libyaml tag
+0.2.5 (the hev fork dropped it, keeping only its own License). No upstream file was changed. Where
+upstream had a symlink (third-part/yaml/include/yaml.h), the file it points to is copied in its place,
+so the content matches upstream.

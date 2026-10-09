@@ -47,7 +47,8 @@ record.
 
 **Reading the app.** The labels in the steps are the app's own ([cli.md](cli.md#the-app)). The
 **route badge** reads LAN, Direct or Relay. "Looking for host" is not a failure. A lookup that runs
-without finding the host for 60 s ends in "Can't reach host" with an error code; record that code.
+without finding the host ends in "Can't reach host" with an error code (at most 60 s, or at once when
+the lookup fails at once); record that code.
 
 Item 1 needs the TV to hold the host, and item 6 is how the TV gets one, so run item 6 first when the
 TV has no host yet.

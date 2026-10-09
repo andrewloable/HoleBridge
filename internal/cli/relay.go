@@ -111,7 +111,7 @@ func relayCmd(args []string, env Env, configDir string) error {
 	if _, ok := opts["bootstrap"]; ok && isNew {
 		return usage("relay --new-key takes no --bootstrap")
 	}
-	nodes, err := bootstrapFlag(opts)
+	nodes, err := bootstrapFlag(opts, env)
 	if err != nil {
 		return err
 	}
@@ -136,7 +136,7 @@ func relayCheckCmd(args []string, env Env, configDir string) error {
 	if len(words) != 1 {
 		return usage("relay check wants a relay key file")
 	}
-	nodes, err := bootstrapFlag(opts)
+	nodes, err := bootstrapFlag(opts, env)
 	if err != nil {
 		return err
 	}
@@ -219,13 +219,28 @@ func keyPairOf(priv ed25519.PrivateKey) noise.KeyPair {
 	return kp
 }
 
-// bootstrapFlag returns the nodes of --bootstrap when the option is given, else the default list.
-func bootstrapFlag(opts map[string]string) ([]string, error) {
+// bootstrapFlag returns the nodes of --bootstrap when the option is given, else the nodes of bootstrapFromEnv.
+func bootstrapFlag(opts map[string]string, env Env) ([]string, error) {
 	v, ok := opts["bootstrap"]
 	if !ok {
-		return bootstrap, nil
+		return bootstrapFromEnv(env)
 	}
 	return parseBootstrap(v)
+}
+
+// bootstrapFromEnv returns the bootstrap nodes that a host, a share, a relay or a relay check uses when no
+// --bootstrap is given: the comma-separated host:port list of HOLEBRIDGE_BOOTSTRAP, else the default list. The
+// variable is a testing hook for a private network (docs/cli.md, configuration).
+func bootstrapFromEnv(env Env) ([]string, error) {
+	v := env.Getenv("HOLEBRIDGE_BOOTSTRAP")
+	if v == "" {
+		return bootstrap, nil
+	}
+	nodes, err := parseBootstrap(v)
+	if err != nil {
+		return nil, usage("HOLEBRIDGE_BOOTSTRAP wants host:port nodes separated by commas, such as 192.0.2.1:49737")
+	}
+	return nodes, nil
 }
 
 // parseBootstrap reads a --bootstrap value: host:port nodes separated by commas. Each needs a host and a
@@ -290,7 +305,7 @@ func runRelay(dir string, nodes []string, env Env) error {
 	ctx, stop := relayContext()
 	defer stop()
 	ctx = context.WithValue(ctx, bootstrapKey{}, nodes)
-	r, err := startRelay(ctx, relayKey, appKey, log.New(env.Stderr, slog.LevelInfo))
+	r, err := startRelay(ctx, relayKey, appKey, log.New(env.Stderr, env.LogLevel))
 	if err != nil {
 		return err
 	}

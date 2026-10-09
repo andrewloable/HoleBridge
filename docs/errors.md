@@ -50,6 +50,14 @@ Generated from spec/errors.json by go generate ./internal/errs. Do not edit by h
 
 **Fix:** chmod 600 ~/.config/holebridge/host.json
 
+## HB-ENGINE-DOWN
+
+**Problem:** the app engine stopped and could not be started again
+
+**Cause:** The engine runs inside the app. It exited, and starting it again failed, for example because the system is short of memory.
+
+**Fix:** Close the app and open it again. If it keeps happening, report it with this code.
+
 ## HB-HANDOFF-EXPIRED
 
 **Problem:** the pairing code timed out

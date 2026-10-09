@@ -1,12 +1,12 @@
 // Connect over the direct route: dial the host's key-derived public key with HyperDHT, open the
 // 'holebridge' channel and exchange handshakes (docs/architecture.md, "Direct route (connection flow)").
 
-const Protomux = require('protomux')
 const c = require('compact-encoding')
 const keys = require('./keys.js')
 const protocol = require('./protocol.js')
 const { Session, Budget, Counter } = require('./mux.js')
 const { relayPolicy } = require('./relay.js')
+const { guardedProtomux } = require('./frame-guard.js')
 
 const PROTOCOL = 'holebridge'
 const VERSION = 1
@@ -76,7 +76,21 @@ async function connectDirect({ dht, key, appKey, relayKey, flags = SUPPORTED_FLA
     opts.relayThrough = relayPolicy({ relayServerPublicKey: server.publicKey, dht })
   }
   const conn = dht.connect(pairs.host.publicKey, opts)
-  const mux = Protomux.from(conn)
+  return openSession(conn, { route: 'direct', flags, lookupTimeout })
+}
+
+/**
+ * openSession(conn, { route, flags, lookupTimeout }) -> Promise<HostSession>
+ *
+ * The channel setup both routes share (docs/architecture.md, "Direct route" and "Session over the LAN").
+ * conn is the Noise stream to the host, under the client key pair and expecting the host public key: the
+ * DHT's stream for the direct route, the LAN stream for lib/lan-session.js. It opens the 'holebridge'
+ * channel, exchanges the handshakes and resolves with the HostSession, whose route is route. Rejects, and
+ * destroys conn, as connectDirect does. The receive budget and the stream count are shared by every route.
+ */
+function openSession(conn, { route, flags = SUPPORTED_FLAGS, lookupTimeout = LOOKUP_TIMEOUT }) {
+  // The guard refuses a control batch inside a control batch before protomux decodes it (lib/frame-guard.js).
+  const mux = guardedProtomux(conn)
   const closeListeners = []
   let pending = null // { resolve, reject } until the host's handshake settles the connect
   let channel = null
@@ -144,7 +158,7 @@ async function connectDirect({ dht, key, appKey, relayKey, flags = SUPPORTED_FLA
         services: remote.services,
         lan: remote.lan || null,
         flags: remote.flags,
-        route: 'direct',
+        route,
         open: (service) => session.open(service),
         on(event, listener) {
           if (event !== 'close') throw new Error(`HostSession emits close only, not ${event}`)
@@ -161,4 +175,4 @@ async function connectDirect({ dht, key, appKey, relayKey, flags = SUPPORTED_FLA
   return connected
 }
 
-module.exports = { connectDirect }
+module.exports = { connectDirect, openSession }

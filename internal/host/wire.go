@@ -18,7 +18,12 @@ func (h *Host) ServeConn(ctx context.Context, s *secretstream.Stream) {
 	}
 	stop := context.AfterFunc(ctx, func() { s.Destroy() })
 	defer stop()
-	h.serve(s, true)
+	h.serve(s, true, false)
+}
+
+// LANAddresses returns the host's LAN addresses (see lanAddresses), for the command's banner.
+func LANAddresses() []string {
+	return lanAddresses()
 }
 
 // lanAddresses returns the host's IPv4 addresses on its interfaces, leaving out loopback and link-local

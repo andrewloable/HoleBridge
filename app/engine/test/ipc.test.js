@@ -85,7 +85,7 @@ test('a connect request calls handlers.connect and replies ok with the same id',
         received = body
         return {
           route: 'direct',
-          services: ['web', 'ssh'],
+          services: [{ name: 'web', kind: 2 }, { name: 'ssh', kind: 3 }],
           ports: [{ service: 'web', port: 8080 }, { service: 'ssh', port: 22 }],
         }
       },
@@ -98,7 +98,7 @@ test('a connect request calls handlers.connect and replies ok with the same id',
     code: '',
     detail: '',
     route: 'direct',
-    services: ['web', 'ssh'],
+    services: [{ name: 'web', kind: 2 }, { name: 'ssh', kind: 3 }],
     ports: [{ service: 'web', port: 8080 }, { service: 'ssh', port: 22 }],
   }, 'the reply is ok, has the same id, and carries route, services and ports')
 }))
@@ -146,6 +146,15 @@ test('an unknown type number sends an HB-IPC-DESYNC error event', catchThrows(as
   const errors = sent.map((f) => decode(f)).filter((msg) => msg.name === 'error')
   t.is(errors.length, 1, 'one error event is sent')
   t.is(errors[0].body.code, 'HB-IPC-DESYNC', 'the code is HB-IPC-DESYNC')
+}))
+
+test('a service kind the engine does not know is encoded as 0 (unknown)', catchThrows((t) => {
+  const frame = encode({
+    name: 'services',
+    id: 0,
+    body: { host: 'living-room', list: [{ name: 'web', kind: 9 }], ports: [] }
+  })
+  t.alike(decode(frame).body.list, [{ name: 'web', kind: 0 }], 'kind 9 is sent as 0')
 }))
 
 test('emit sends an event with id 0 that decodes back to the event', catchThrows(async (t) => {

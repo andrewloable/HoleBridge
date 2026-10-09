@@ -118,6 +118,9 @@ type Host struct {
 	services  map[string]service          // by name: what an open is dialed to
 	conns     map[*hyperdht.Conn]struct{} // the live connections: one session each, for the one key
 	links     map[*link]struct{}          // the sessions, each with a channel a services list can be pushed on
+	// streamMeters are the streams whose forward runs, each with the meter it counts on (streamMeter). A reattach
+	// moves a stream's count with it, so the set is read and changed under mu.
+	streamMeters map[*streamMeter]struct{}
 }
 
 // New returns a host for cfg. The host key pair and the client key pair come from cfg.Key and appKey
@@ -154,6 +157,7 @@ func New(cfg *config.Config, appKey [32]byte, opts Options) (*Host, error) {
 		udp:           udpflow.NewCounter(cfg.Limits.UDPFlowsTotal),
 		conns:         map[*hyperdht.Conn]struct{}{},
 		links:         map[*link]struct{}{},
+		streamMeters:  map[*streamMeter]struct{}{},
 	}
 	if h.log == nil {
 		h.log = slog.New(slog.DiscardHandler)
@@ -363,10 +367,11 @@ func (h *Host) stop() {
 // serves is destroyed: its key is no longer the one the host listens under.
 func (h *Host) acceptLoop(srv *hyperdht.Server) {
 	for {
-		conn, err := srv.Accept()
+		accepted, err := srv.Accept()
 		if err != nil {
 			return // srv closed: Run stopped, or a reload replaced it
 		}
+		conn := accepted.Conn
 		if !h.trackServing(srv, conn) {
 			conn.Destroy()
 			return
@@ -374,8 +379,9 @@ func (h *Host) acceptLoop(srv *hyperdht.Server) {
 		if h.streamOptions != nil {
 			h.streamOptions(secretstream.Options{Keepalive: conn.Keepalive()})
 		}
+		relayed := accepted.Relayed()
 		go func() {
-			if err := h.serve(conn, false); err != nil {
+			if err := h.serve(conn, false, relayed); err != nil {
 				h.log.Debug("session ended", "err", err)
 			}
 		}()
@@ -407,8 +413,9 @@ func (h *Host) refuse(clientPub, remote [32]byte) bool {
 // accept decides an open of the service name. An unknown service, or a UDP service, which uses flows,
 // is rejected. Otherwise accept dials the target within the target connect timeout, and rejects with
 // code 3 when the target refuses and code 4 when it does not answer in time. Reasons name no address and
-// no service (spec/ipc.md, rule 9).
-func (h *Host) accept(name string) mux.AcceptResult {
+// no service (spec/ipc.md, rule 9). An accepted stream counts on m, the meter of the link that accepted it, while
+// it runs; a reattach moves it to the meter of the link that owns it (streamMeter), and its bytes count as they move.
+func (h *Host) accept(name string, m *meter) mux.AcceptResult {
 	h.mu.Lock()
 	svc, ok := h.services[name]
 	h.mu.Unlock()
@@ -429,7 +436,12 @@ func (h *Host) accept(name string) mux.AcceptResult {
 		h.log.Warn("target refused", "service", name)
 		return mux.AcceptResult{Code: rejectRefused, Reason: "target refused the connection"}
 	}
-	return mux.AcceptResult{Target: func(st *mux.Stream) { forward(st, conn, svc.idle) }}
+	return mux.AcceptResult{Target: func(st *mux.Stream) {
+		sm := &streamMeter{st: st}
+		h.beginStream(sm, m)
+		defer h.endStream(sm)
+		forward(st, conn, svc.idle, sm)
+	}}
 }
 
 // trackServing records c as a live connection when srv is still the server that serves. It reports false when

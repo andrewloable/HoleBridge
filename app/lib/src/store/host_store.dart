@@ -53,7 +53,8 @@ class HostStore {
     return _toHosts([...records, added]).last;
   });
 
-  /// Removes a host and its ports, cert pins, services cache, LAN and VPN addresses.
+  /// Removes a host and its ports, cert pins, services cache and kinds, LAN addresses and port, and VPN
+  /// addresses.
   Future<void> removeHost(String id) => _write(() async {
     await _saveRecords((await _records()).where((record) => record.id != id).toList());
     await _backend.delete(_stateKey(id));
@@ -76,6 +77,16 @@ class HostStore {
   Future<void> saveServices(String hostId, List<String> services) =>
       _update(hostId, (state) => state.services = List<String>.of(services));
 
+  /// The service kinds of a host, by service name, in the wire numbering (spec/ipc.md, Encoding).
+  /// Kept beside the names cache, and empty when none are saved, as in a state file written before
+  /// kinds were stored.
+  Future<Map<String, int>> serviceKinds(String hostId) async => (await _state(hostId)).kinds;
+
+  /// Saves the kinds of a host's services. The controller saves them with the names cache, at the
+  /// same moments.
+  Future<void> saveServiceKinds(String hostId, Map<String, int> kinds) =>
+      _update(hostId, (state) => state.kinds = Map<String, int>.of(kinds));
+
   /// The local port of each service of a host, by service name.
   Future<Map<String, int>> ports(String hostId) async => (await _state(hostId)).ports;
 
@@ -86,6 +97,20 @@ class HostStore {
 
   Future<void> saveLan(String hostId, List<String> addresses) =>
       _update(hostId, (state) => state.lan = List<String>.of(addresses));
+
+  /// The LAN port the host reported with its addresses (the lan struct of connect), or 0 when none is
+  /// saved.
+  Future<int> lanPort(String hostId) async => (await _state(hostId)).lanPort;
+
+  Future<void> saveLanPort(String hostId, int port) =>
+      _update(hostId, (state) => state.lanPort = port);
+
+  /// Whether Share with my network is on for a host: its listeners bind 0.0.0.0 instead of 127.0.0.1
+  /// (docs/cli.md#the-app). False until it is saved, and for a state file written before the setting.
+  Future<bool> shared(String hostId) => throw UnimplementedError();
+
+  /// Saves the Share with my network setting of a host. Refuses an unknown host with a StateError.
+  Future<void> saveShared(String hostId, bool shared) => throw UnimplementedError();
 
   /// The certificate pin of one service of a host, or null when none is set.
   Future<String?> certPins(String hostId, String service) async =>
@@ -196,16 +221,22 @@ class _Record {
   Map<String, dynamic> toJson() => {'id': id, 'name': name, 'key': key, 'appKey': appKey};
 }
 
-/// The per-host state that is not the host record: services, ports, cert pins, LAN and VPN addresses.
+/// The per-host state that is not the host record: services and their kinds, ports, cert pins, LAN
+/// addresses and port, and VPN addresses. Kinds and the LAN port are read as none when a state file
+/// does not have them.
 class _HostState {
   _HostState.fromJson(Map<String, dynamic> json)
     : services = List<String>.from(json['services'] as List? ?? const []),
+      kinds = Map<String, int>.from(json['kinds'] as Map? ?? const {}),
+      lanPort = (json['lanPort'] as int?) ?? 0,
       ports = Map<String, int>.from(json['ports'] as Map? ?? const {}),
       pins = Map<String, String>.from(json['pins'] as Map? ?? const {}),
       lan = List<String>.from(json['lan'] as List? ?? const []),
       vpn = List<String>.from(json['vpn'] as List? ?? const []);
 
   List<String> services;
+  Map<String, int> kinds;
+  int lanPort;
   final Map<String, int> ports;
   final Map<String, String> pins;
   List<String> lan;
@@ -213,6 +244,8 @@ class _HostState {
 
   Map<String, dynamic> toJson() => {
     'services': services,
+    'kinds': kinds,
+    'lanPort': lanPort,
     'ports': ports,
     'pins': pins,
     'lan': lan,

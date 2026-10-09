@@ -50,3 +50,7 @@ app.*.map.json
 # The engine bundle and native addon copies, made by tool/copy_engine_bundle.sh
 /assets/engine.bundle
 /assets/engine_addons/
+
+# License texts, made by tool/collect_app_licenses.sh (committed sources are in app/licenses/)
+/assets/licenses/
+/assets/.licenses.tmp/

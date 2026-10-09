@@ -186,14 +186,15 @@ func (c *sniffConn) speaksTLS() bool {
 }
 
 // classify maps an error from a probe to its result. A timeout is silence. A closed or reset
-// connection is failed. Anything else is bytes that are not HTTP.
+// connection is failed. Anything else is bytes that are not HTTP. A reset is ECONNRESET on Unix and
+// WSAECONNRESET on Windows; isWindowsReset covers the second, and is always false off Windows.
 func classify(err error) result {
 	var ne net.Error
 	switch {
 	case errors.As(err, &ne) && ne.Timeout():
 		return silent
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, net.ErrClosed),
-		errors.Is(err, syscall.ECONNRESET):
+		errors.Is(err, syscall.ECONNRESET), isWindowsReset(err):
 		return failed
 	}
 	return gotNonHTTP

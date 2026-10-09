@@ -3,6 +3,7 @@
 
 const b4a = require('b4a')
 const c = require('compact-encoding')
+const { KIND } = require('./protocol.js')
 
 // A struct encodes its fields in order. Its value is a plain object.
 function struct(fields) {
@@ -51,6 +52,31 @@ const PORT = struct([
   ['service', c.string],
   ['port', c.uint]
 ])
+
+// A kind the engine does not know encodes as 0 (unknown), so a frame never carries a number the engine
+// cannot name. Decoding reads any uint, as the Dart codec does, so it never refuses a kind.
+function wireKind(kind) {
+  return Number.isInteger(kind) && kind >= KIND.unknown && kind <= KIND.udp ? kind : KIND.unknown
+}
+
+const serviceKind = {
+  preencode(state, kind) {
+    c.uint.preencode(state, wireKind(kind))
+  },
+  encode(state, kind) {
+    c.uint.encode(state, wireKind(kind))
+  },
+  decode(state) {
+    return c.uint.decode(state)
+  }
+}
+
+// A service entry: its name, then its kind (spec/ipc.md, Encoding).
+const SERVICE = struct([
+  ['name', c.string],
+  ['kind', serviceKind]
+])
+
 const NAT = struct([
   ['host', c.string],
   ['port', c.uint],
@@ -81,7 +107,7 @@ const REPLY = {
     ['code', c.string],
     ['detail', c.string],
     ['route', c.string],
-    ['services', c.array(c.string)],
+    ['services', c.array(SERVICE)],
     ['ports', c.array(PORT)]
   ])
 }
@@ -176,7 +202,7 @@ const EVENTS = [
     name: 'services',
     enc: struct([
       ['host', c.string],
-      ['list', c.array(c.string)],
+      ['list', c.array(SERVICE)],
       ['ports', c.array(PORT)]
     ])
   },

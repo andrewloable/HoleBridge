@@ -55,7 +55,7 @@ $ holebridge service add jellyfin 8096
 $ holebridge service add ssh 22 --kind tcp
 $ holebridge service add dns 53 --kind udp
 $ holebridge host
-Hosting 4 services: web (https), jellyfin (http), ssh (tcp), dns (udp)
+Hosting 4 services: dns (udp), jellyfin (http), ssh (tcp), web (https)
 Key: 7KQ-M4X-9TR
 [QR code]  https://holebridge.app/k#7KQM4X9TR.<application key>
 ```

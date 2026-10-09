@@ -62,6 +62,16 @@ module.exports = { CODES: {
       "go"
     ]
   },
+  "HB-ENGINE-DOWN": {
+    "code": "HB-ENGINE-DOWN",
+    "title": "Engine not running",
+    "problem": "the app engine stopped and could not be started again",
+    "cause": "The engine runs inside the app. It exited, and starting it again failed, for example because the system is short of memory.",
+    "fix": "Close the app and open it again. If it keeps happening, report it with this code.",
+    "where": [
+      "app"
+    ]
+  },
   "HB-HANDOFF-EXPIRED": {
     "code": "HB-HANDOFF-EXPIRED",
     "title": "Pairing code expired",

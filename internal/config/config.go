@@ -129,6 +129,12 @@ func defaultLimits() Limits {
 	}
 }
 
+// Defaults returns the config of a host that has no host.json: no key, no services, and the lan and limits
+// defaults. The share command builds its config with it, since it keeps no host.json.
+func Defaults() *Config {
+	return &Config{Services: map[string]Service{}, LAN: defaultLAN(), Limits: defaultLimits()}
+}
+
 // Dir returns the config directory: flag if set, else HOLEBRIDGE_CONFIG, else
 // $XDG_CONFIG_HOME/holebridge, else ~/.config/holebridge (%APPDATA%\holebridge on Windows).
 func Dir(flag string, getenv func(string) string) (string, error) {

@@ -72,6 +72,8 @@ flutter:
   assets:
     - assets/engine.bundle
     - assets/engine_addons/
+    # License texts, collected by tool/collect_app_licenses.sh (git-ignored).
+    - assets/licenses/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

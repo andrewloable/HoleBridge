@@ -34,8 +34,14 @@ per host, 9-character keys, and an app for TVs, phones and desktops.
 
 Rules that are easy to break:
 
+- **BladeWatch is a proven reference.** The BladeWatch implementation (`../BladeWatch`) already works
+  in the field, so use it as a reference for the Pear transport: routes, mux, relay, LAN probes and
+  the app's worklet (`../BladeWatch/docs/networking-and-tunnels.md`, `../BladeWatch/relay/`,
+  `../BladeWatch/companion/`). It is MIT like HoleBridge, so its code may be reused with its
+  copyright line kept.
 - **Docs stand on their own.** Project docs and issues describe HoleBridge on its own terms and
-  never name the owner's other projects, even where a design came from one.
+  never name the owner's other projects, even where a design came from one. This file is the one
+  exception: it names BladeWatch above as a reference for agents.
 - **Holesail is AGPL-3.0, HoleBridge is MIT.** Read its docs, never copy its code.
 - **Never log** a key, derived secrets, PINs, tokens or payload bytes. Keys reach the worklet over
   IPC, never on a command line or in the environment.

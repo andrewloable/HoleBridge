@@ -76,8 +76,8 @@ func closeServer(t *testing.T, srv *Server) {
 
 // acceptAll calls srv.Accept until it fails. It passes each connection on the returned channel, and closes
 // the channel when Accept fails.
-func acceptAll(srv *Server) <-chan *Conn {
-	conns := make(chan *Conn)
+func acceptAll(srv *Server) <-chan *AcceptedConn {
+	conns := make(chan *AcceptedConn)
 	go func() {
 		defer close(conns)
 		for {
@@ -93,7 +93,7 @@ func acceptAll(srv *Server) <-chan *Conn {
 
 // expectNoAccepts fails the test for each connection that conns passes on. It also fails when conns is not
 // closed within 10 s, which means Accept did not return an error after Close.
-func expectNoAccepts(t *testing.T, conns <-chan *Conn) {
+func expectNoAccepts(t *testing.T, conns <-chan *AcceptedConn) {
 	t.Helper()
 	timeout := time.After(10 * time.Second)
 	for {
@@ -523,8 +523,10 @@ func TestSlowFirewallDoesNotStallTheNode(t *testing.T) {
 
 // admitRawStream sends a raw handshake from the DHT node d to the server whose public key is host, naming st as the
 // client's UDX stream. It returns the address of the node that admitted the handshake and the server's UDX stream id
-// from the reply. It fails the test when no node admits it.
-func admitRawStream(t *testing.T, d *DHT, host [32]byte, st *udx.Stream) (*net.UDPAddr, uint32) {
+// from the reply. When direct is not nil the handshake goes straight to that node, so it comes direct; otherwise it goes
+// to the nodes that hold the server's record, and a holder's handshake is relayed. It fails the test when no node admits
+// it.
+func admitRawStream(t *testing.T, d *DHT, host [32]byte, st *udx.Stream, direct *net.UDPAddr) (*net.UDPAddr, uint32) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -539,7 +541,16 @@ func admitRawStream(t *testing.T, d *DHT, host [32]byte, st *udx.Stream) (*net.U
 	must(t, err)
 	value, err := EncodeHandshake(Handshake{Mode: handshakeFromClient, Noise: msg1})
 	must(t, err)
-	for addr := range d.holders(ctx, target) {
+	var nodes <-chan *net.UDPAddr
+	if direct != nil {
+		one := make(chan *net.UDPAddr, 1)
+		one <- direct
+		close(one)
+		nodes = one
+	} else {
+		nodes = d.holders(ctx, target)
+	}
+	for addr := range nodes {
 		resp, err := d.node.Request(ctx, addr, dhtrpc.Request{Command: cmdPeerHandshake, Target: target[:], Value: value})
 		if err != nil || resp.Error != 0 {
 			continue
@@ -565,7 +576,9 @@ func admitRawStream(t *testing.T, d *DHT, host [32]byte, st *udx.Stream) (*net.U
 
 // Test for HoleBridge-85m.5.11: an admitted client that never sends its secret stream header does not hold its
 // stream. The server's header exchange has headerExchangeWait; when it expires the server closes the stream, so the
-// client's read ends, and Accept returns no connection.
+// client's read ends, and Accept returns no connection. The handshake goes straight to the server's node, so it comes
+// direct and the server claims the stream at admission, as upstream does. A relayed handshake's stream is not claimed
+// at admission (its puncher or its relay pairing claims it), so nothing here would connect it to the client.
 func TestAdmittedStreamWithoutHeaderIsDropped(t *testing.T) {
 	tn := startTestnet(t, 10)
 	host := testKeyPair(3)
@@ -576,7 +589,7 @@ func TestAdmittedStreamWithoutHeaderIsDropped(t *testing.T) {
 	d := tn.Nodes[9]
 	st := d.newStream()
 	t.Cleanup(func() { st.Destroy() })
-	addr, id := admitRawStream(t, d, host.Public, st)
+	addr, id := admitRawStream(t, d, host.Public, st, nodeAddr(t, tn.Nodes[0]))
 	must(t, st.Connect(id, addr))
 
 	// The client sends nothing on the stream. The read ends once the server drops the stream.
@@ -594,6 +607,45 @@ func TestAdmittedStreamWithoutHeaderIsDropped(t *testing.T) {
 	case r := <-accepted:
 		t.Errorf("Accept returned a connection (err %v) for a client that never sent its header", r.err)
 	default:
+	}
+}
+
+// Test for HoleBridge-85m.5.26: a stream that no path claims is given up when its admitted handshake clears, as upstream
+// drops a relayed stream that nothing took. A stream that a path has claimed is left up when the handshake clears.
+func TestUnclaimedStreamIsGivenUpWhenHandshakeClears(t *testing.T) {
+	tn := startTestnet(t, 2)
+	d := tn.Nodes[0]
+	srv := newServer(t, d, ServerOptions{})
+	unclaimed, claimed := d.newStream(), d.newStream()
+	t.Cleanup(func() {
+		unclaimed.Destroy()
+		claimed.Destroy()
+	})
+	var unclaimedClaim, claimedClaim streamClaim
+	claimedClaim.take()
+	srv.keepHolepunchWith(srv.reserveHolepunch(), [32]byte{1}, false, unclaimed, &unclaimedClaim)
+	srv.keepHolepunchWith(srv.reserveHolepunch(), [32]byte{2}, false, claimed, &claimedClaim)
+
+	ended := make(chan struct{})
+	go func() {
+		unclaimed.Read(make([]byte, 1))
+		close(ended)
+	}()
+	select {
+	case <-ended:
+	case <-time.After(handshakeClearWait + 5*time.Second):
+		t.Fatalf("the unclaimed stream was still up %v after its handshake cleared", handshakeClearWait+5*time.Second)
+	}
+
+	up := make(chan struct{})
+	go func() {
+		claimed.Read(make([]byte, 1))
+		close(up)
+	}()
+	select {
+	case <-up:
+		t.Error("the claimed stream was given up when its handshake cleared")
+	case <-time.After(500 * time.Millisecond):
 	}
 }
 

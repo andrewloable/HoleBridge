@@ -1,6 +1,7 @@
 // Checks that THIRD_PARTY_NOTICES.md names every pinned third-party package at its exact version:
-// each module in go.mod, and each non-dev package in the app engine and spec/gen lockfiles. Exits 1
-// and lists what is missing. Usage: node scripts/check-notices.js
+// each module in go.mod, each non-dev package in the app engine, spec/gen and interop/js lockfiles,
+// and each hosted and git package in app/pubspec.lock. Exits 1 and lists what is missing.
+// Usage: node scripts/check-notices.js
 'use strict';
 
 const fs = require('node:fs');
@@ -38,6 +39,30 @@ function npmPackages(file) {
     }));
 }
 
+// Hosted and git packages from a pub lockfile, as {name, version, from}. SDK packages (Flutter SDK)
+// and path packages (code in this repo) are skipped; hosted and git packages are required.
+// pubspec.lock does not record which transitive packages are dev-only (the npm lockfiles do), so
+// every hosted and git package is required: the dev-only ones are listed under "not shipped" in
+// THIRD_PARTY_NOTICES.md.
+function pubPackages(file) {
+  const out = [];
+  let cur = null;
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    let m = line.match(/^ {2}(\S+):$/);
+    if (m) {
+      cur = { name: m[1] };
+      out.push(cur);
+    } else if (cur && (m = line.match(/^ {4}source: (\S+)$/))) {
+      cur.source = m[1];
+    } else if (cur && (m = line.match(/^ {4}version: "(.+)"$/))) {
+      cur.version = m[1];
+    }
+  }
+  return out
+    .filter((p) => p.source === 'hosted' || p.source === 'git')
+    .map(({ name, version }) => ({ name, version, from: path.relative(ROOT, file) }));
+}
+
 // A table row names the package and its version in its first two cells.
 const notices = fs.readFileSync(path.join(ROOT, 'THIRD_PARTY_NOTICES.md'), 'utf8').split('\n');
 const listed = ({ name, version }) => notices.some((line) => line.startsWith(`| ${name} | ${version} |`));
@@ -46,6 +71,8 @@ const pins = [
   ...goModules(path.join(ROOT, 'go.mod')),
   ...npmPackages(path.join(ROOT, 'app/engine/package-lock.json')),
   ...npmPackages(path.join(ROOT, 'spec/gen/package-lock.json')),
+  ...npmPackages(path.join(ROOT, 'interop/js/package-lock.json')),
+  ...pubPackages(path.join(ROOT, 'app/pubspec.lock')),
 ];
 
 const missing = pins.filter((pin) => !listed(pin));

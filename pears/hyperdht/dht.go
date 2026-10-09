@@ -13,6 +13,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/andrewloable/HoleBridge/pears/dhtrpc"
@@ -60,6 +61,14 @@ type DHT struct {
 // gate returns the DHT's gate on randomized punches (dht._randomPunchLimit and _randomPunchInterval).
 func (d *DHT) gate() *randomGate {
 	return d.randoms
+}
+
+// ForceRelayForTest is the relay test seam (dht.forceRelay) for packages outside this one. After the call, every
+// connect and server of d claims its streams only through a relay pairing, never on the direct path. Call it
+// before d connects or listens. The testing.TB argument marks it as test-only, as NewTestnet does.
+func ForceRelayForTest(t testing.TB, d *DHT) {
+	t.Helper()
+	d.forceRelay = true
 }
 
 // ErrDHTClosed is the error of a Connect on a DHT that Close has stopped.

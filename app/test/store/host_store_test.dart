@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -171,6 +172,152 @@ void main() {
 
       await store.saveRelayKey(null);
       expect(await store.relayKey(), isNull);
+    });
+
+    test('serviceKinds round-trip per host and are saved apart from the names cache', () async {
+      final store = HostStore(MemoryBackend());
+      final a = await store.addHost(name: 'A', key: keyA, appKey: appKeyA);
+      final b = await store.addHost(name: 'B', key: keyB, appKey: appKeyA);
+
+      await store.saveServices(a.id, ['web', 'ssh']);
+      await store.saveServiceKinds(a.id, {'web': 2, 'ssh': 3});
+      await store.saveServiceKinds(b.id, {'api': 1});
+
+      expect(await store.serviceKinds(a.id), {'web': 2, 'ssh': 3});
+      expect(await store.serviceKinds(b.id), {'api': 1});
+      expect(await store.servicesCache(a.id), ['web', 'ssh'], reason: 'the names cache is unchanged');
+    });
+
+    test('a state file written without kinds or a LAN port reads them as none', () async {
+      final backend = MemoryBackend();
+      final store = HostStore(backend);
+      final host = await store.addHost(name: 'Old', key: keyA, appKey: appKeyA);
+      // The state an earlier version wrote: no kinds key and no lanPort key.
+      backend.entries['host.${host.id}'] = jsonEncode({
+        'services': ['web'],
+        'ports': {},
+        'pins': {},
+        'lan': ['192.0.2.10'],
+        'vpn': [],
+      });
+
+      expect(await store.serviceKinds(host.id), isEmpty);
+      expect(await store.lanPort(host.id), 0);
+      expect(await store.servicesCache(host.id), ['web']);
+      expect(await store.lanAddresses(host.id), ['192.0.2.10']);
+    });
+
+    test('lanPort is 0 until saved, then round-trips per host', () async {
+      final store = HostStore(MemoryBackend());
+      final a = await store.addHost(name: 'A', key: keyA, appKey: appKeyA);
+      final b = await store.addHost(name: 'B', key: keyB, appKey: appKeyA);
+
+      expect(await store.lanPort(a.id), 0);
+      await store.saveLanPort(a.id, 4433);
+
+      expect(await store.lanPort(a.id), 4433);
+      expect(await store.lanPort(b.id), 0);
+    });
+
+    test('removeHost deletes the service kinds and the LAN port with the host', () async {
+      final backend = MemoryBackend();
+      final store = HostStore(backend);
+      final gone = await store.addHost(name: 'Gone', key: keyA, appKey: appKeyA);
+      final kept = await store.addHost(name: 'Kept', key: keyB, appKey: appKeyA);
+      for (final id in [gone.id, kept.id]) {
+        await store.saveServiceKinds(id, {'web': 2});
+        await store.saveLanPort(id, 4433);
+      }
+
+      await store.removeHost(gone.id);
+
+      expect(await store.serviceKinds(gone.id), isEmpty);
+      expect(await store.lanPort(gone.id), 0);
+      expect(backend.entries.keys.where((key) => key.contains(gone.id)), isEmpty);
+      expect(await store.serviceKinds(kept.id), {'web': 2});
+      expect(await store.lanPort(kept.id), 4433);
+    });
+
+    test('shared is off until saved, then round-trips per host and survives a new store', () async {
+      final backend = MemoryBackend();
+      final store = HostStore(backend);
+      final a = await store.addHost(name: 'A', key: keyA, appKey: appKeyA);
+      final b = await store.addHost(name: 'B', key: keyB, appKey: appKeyA);
+
+      expect(await store.shared(a.id), isFalse, reason: 'Share with my network is off by default');
+      await store.saveShared(a.id, true);
+
+      expect(await store.shared(a.id), isTrue);
+      expect(await store.shared(b.id), isFalse);
+      expect(await HostStore(backend).shared(a.id), isTrue);
+
+      await store.saveShared(a.id, false);
+      expect(await store.shared(a.id), isFalse);
+    });
+
+    test('a state file written without the shared setting reads it as off', () async {
+      final backend = MemoryBackend();
+      final store = HostStore(backend);
+      final host = await store.addHost(name: 'Old', key: keyA, appKey: appKeyA);
+      // The state an earlier version wrote: no shared key.
+      backend.entries['host.${host.id}'] = jsonEncode({
+        'services': ['web'],
+        'kinds': {'web': 2},
+        'lanPort': 4433,
+        'ports': {},
+        'pins': {},
+        'lan': ['192.0.2.10'],
+        'vpn': [],
+      });
+
+      expect(await store.shared(host.id), isFalse);
+      expect(await store.lanPort(host.id), 4433);
+      expect(await store.servicesCache(host.id), ['web']);
+    });
+
+    test('saving the shared setting leaves the rest of the host state as it was', () async {
+      final store = HostStore(MemoryBackend());
+      final host = await store.addHost(name: 'A', key: keyA, appKey: appKeyA);
+      await store.saveServices(host.id, ['web']);
+      await store.savePort(host.id, 'web', 8080);
+      await store.saveLanPort(host.id, 4433);
+
+      await store.saveShared(host.id, true);
+
+      expect(await store.servicesCache(host.id), ['web']);
+      expect(await store.ports(host.id), {'web': 8080});
+      expect(await store.lanPort(host.id), 4433);
+    });
+
+    test('removeHost deletes the shared setting with the host', () async {
+      final backend = MemoryBackend();
+      final store = HostStore(backend);
+      final gone = await store.addHost(name: 'Gone', key: keyA, appKey: appKeyA);
+      final kept = await store.addHost(name: 'Kept', key: keyB, appKey: appKeyA);
+      await store.saveShared(gone.id, true);
+      await store.saveShared(kept.id, true);
+
+      await store.removeHost(gone.id);
+
+      expect(await store.shared(gone.id), isFalse);
+      expect(backend.entries.keys.where((key) => key.contains(gone.id)), isEmpty);
+      expect(await store.shared(kept.id), isTrue);
+    });
+
+    test('saveShared for a host that is not stored throws StateError', () async {
+      final backend = MemoryBackend();
+      final store = HostStore(backend);
+      await store.addHost(name: 'A', key: keyA, appKey: appKeyA);
+
+      Object? error;
+      try {
+        await store.saveShared('no-such-host', true);
+      } on StateError catch (e) {
+        error = e;
+      }
+
+      expect(error, isA<StateError>());
+      expect(backend.entries.keys.where((key) => key.contains('no-such-host')), isEmpty);
     });
 
     test('nothing reaches SharedPreferences: a write goes to the secure backend, and no lib file imports it', () async {

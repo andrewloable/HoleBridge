@@ -6,8 +6,8 @@
 // or of any connect under dht.forcePunch, and punches toward the server. The probe round asks the server, through
 // its relay, for its NAT state and punches toward it, the round punch asks the server to punch, and the puncher
 // connects on a datagram from the server, which claims the stream. A punch on a birthday socket moves the stream onto
-// that socket. Not ported: the LAN ping of connectThroughNode, the reopen of an unstable socket, and the DHT's limit
-// on randomized punches.
+// that socket. An unstable NAT is reopened on a fresh birthday socket, which carries the probes from then on. Not
+// ported: the LAN ping of connectThroughNode.
 package hyperdht
 
 import (
@@ -87,6 +87,7 @@ func (a *attempt) startPunch(r punchReply) {
 		Initiator:      true,
 		RemoteFirewall: r.payload.Firewall,
 		Gate:           a.d.gate(),
+		Sample:         a.d.sampleSocket,
 		OnConnect:      func(sock punchSocket, from *net.UDPAddr) { a.claimPunched(cp, r, sock, from) },
 		OnAbort:        func() { a.finish(claimResult{err: errHolepunchAborted}) },
 	})
@@ -264,6 +265,27 @@ func (cp *connectPunch) probe(ctx context.Context, serverAddr *Address, relay Re
 			return nil, Address{}, errPunchDone
 		}
 	}
+	// An unstable socket is reopened on a fresh socket, and the probe round is run again from it (upstream probeRound:
+	// analyze(false), then analyze(true) for an unstable socket, and a new round when the reopen made it stable).
+	stable, err := cp.p.analyze(ctx, false)
+	if err != nil {
+		return nil, Address{}, err
+	}
+	if cp.done() {
+		return nil, Address{}, errPunchDone
+	}
+	if !stable {
+		stable, err = cp.p.analyze(ctx, true)
+		if err != nil {
+			return nil, Address{}, err
+		}
+		if cp.done() {
+			return nil, Address{}, errPunchDone
+		}
+		if stable {
+			return cp.probe(ctx, serverAddr, relay, false)
+		}
+	}
 	remote, local, _ := cp.p.firewalls()
 	if (remote == firewallUnknown || len(reply.Token) == 0) && retry {
 		return cp.probe(ctx, serverAddr, relay, false)
@@ -388,7 +410,13 @@ func (cp *connectPunch) send(ctx context.Context, dest, peer Address, pl Holepun
 	if err != nil {
 		return HolepunchPayload{}, Holepunch{}, nil, err
 	}
-	resp, err := cp.a.d.node.Request(ctx, udpAddrOf(dest), dhtrpc.Request{Command: cmdPeerHolepunch, Target: cp.target[:], Value: msg})
+	// The request goes out from the puncher's socket, and its reply comes back to that socket (upstream updateHolepunch's
+	// socket option). After a reopen that is the fresh socket.
+	sock := cp.p.probeSocket()
+	if sock == nil {
+		return HolepunchPayload{}, Holepunch{}, nil, errPunchDone
+	}
+	resp, err := sock.Request(ctx, udpAddrOf(dest), dhtrpc.Request{Command: cmdPeerHolepunch, Target: cp.target[:], Value: msg})
 	if err != nil {
 		return HolepunchPayload{}, Holepunch{}, nil, err
 	}

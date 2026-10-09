@@ -28,6 +28,23 @@ android {
         // flag during build.
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // The ABIs come from Flutter's Gradle plugin (arm64-v8a, armeabi-v7a, x86_64). Do not set
+        // abiFilters here: it conflicts with flutter build apk --split-per-abi.
+        externalNativeBuild {
+            cmake {
+                // Plain C with no STL, so do not link libc++ into the APK.
+                arguments += listOf("-DANDROID_STL=none")
+            }
+        }
+    }
+
+    // libholebridge_tun.so: the VPN network stack and its JNI glue.
+    externalNativeBuild {
+        cmake {
+            path = file("../../native/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     buildTypes {
@@ -47,4 +64,9 @@ kotlin {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    // JVM unit tests under app/src/test (testDebugUnitTest). Pinned exactly.
+    testImplementation("junit:junit:4.13.2")
 }

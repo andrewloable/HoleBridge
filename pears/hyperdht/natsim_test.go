@@ -16,10 +16,14 @@ package hyperdht
 // answer would, and it is not counted by punches.
 
 import (
+	"context"
+	"errors"
 	"math/rand/v2"
 	"net"
 	"net/netip"
 	"sync"
+
+	"github.com/andrewloable/HoleBridge/pears/dhtrpc"
 )
 
 // simHops is the number of hops a datagram crosses. Upstream's low TTL (5) dies before it, the default (64)
@@ -182,6 +186,16 @@ func (s *simSocket) OnPunch(handler func(from *net.UDPAddr)) {
 	s.net.mu.Lock()
 	defer s.net.mu.Unlock()
 	s.onPunch = handler
+}
+
+// Observe returns the address that to sees for the socket, as a ping's answer would, with no datagram counted.
+func (s *simSocket) Observe(ctx context.Context, to *net.UDPAddr) (Address, error) {
+	return s.net.observe(s, addressOf(to)), nil
+}
+
+// Request is not used by the simulated sockets: their tests run the holepuncher alone, which sends no dht-rpc request.
+func (s *simSocket) Request(ctx context.Context, to *net.UDPAddr, req dhtrpc.Request) (*dhtrpc.Response, error) {
+	return nil, errors.ErrUnsupported
 }
 
 // receive hands a datagram from src to the socket's handler, if it has one.

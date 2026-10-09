@@ -151,10 +151,33 @@ Protomux channel and protocol. Only the carrier differs.
    network) and when the session drops. A TV that was on the DHT route moves to the LAN when it
    finds the host there; a phone that walks out of the house moves from the LAN to the DHT.
 4. **"Looking" and "can't reach" are different states.** A DHT lookup can take 30 s or more on a
-   slow network, and "still looking" must never read as "failed". After a failure the app retries
-   by itself after 30 s.
+   slow network, and "still looking" must never read as "failed". After a failed first connect the app
+   retries by itself after 30 s; after a drop, the backoff in
+   [Sessions and reconnects](#sessions-and-reconnects) applies.
 5. **Every search is a fresh attempt**, never a wait on an old one. A long-lived dial that missed
    a host restart does not notice the host came back.
+
+**Proposed; the owner may revise.** The rules for failures and for a live session:
+
+- **The first failure ends the connect.** The first search that fails ends the app's connect with its
+  error: `HB-LOOKUP-TIMEOUT` when no host answers (at most 60 s), at once when the lookup fails at once
+  (HyperDHT reports the host as not found), or `HB-VERSION-MISMATCH` at once. The host keeps searching
+  after that, except after a version mismatch. The error of the last failed search stays available until a search finds a route, so a
+  later open can fail with that code.
+- **Can't reach.** A search that fails reports "can't reach" at once. A search that gets no answer
+  reports it at 60 s.
+- **Version mismatch.** Waiting does not change a protocol version, so `HB-VERSION-MISMATCH` is not
+  retried on a timer. The state stays "can't reach" with that code. An address change still starts a
+  fresh search. The manager has no retry-now call, so the sessions layer must start a new manager for
+  the host to try again, unless the owner adds one.
+- **Address change with a live session.** The search runs as usual, LAN first. A LAN host that is found
+  replaces the live session, whatever its route. With no LAN host, a live direct or relay session is
+  kept and no DHT dial starts, since a fresh dial would replace a healthy session (for example after an
+  IPv6 address rotation). A live LAN session is replaced by a DHT session once that one is up, because
+  the device has left the network. The old session closes only after the new one is up. A search that
+  an address change overtakes is abandoned, and a dial that answers after that is closed unused.
+  **Owner to confirm:** keeping a direct session means a phone that moves from Wi-Fi to mobile data
+  recovers when keepalives detect the dead path and the drop starts a reconnect, not at the next 5 s poll.
 
 Open streams survive a route change ([Sessions and reconnects](#sessions-and-reconnects)).
 
@@ -291,7 +314,12 @@ special Apple entitlement. So the app:
 handshake over it (`@hyperswarm/secret-stream` wraps any duplex stream), as initiator with the
 client key pair, expecting the host public key. The host destroys any connection whose remote
 static key is not an admitted client key, and bounds connections that have not proven it yet
-([limits](#limits)). From there it is the same Protomux channel and protocol.
+([limits](#limits)). A connection is proven by its first message that decrypts under the session keys;
+keepalives do not count, and a replayed handshake cannot produce one. Until then no frame may name more
+than 65535 bytes ([limits](#limits)). The host hands the stream to the
+application only after that message, and the application reads it first. The app sends its Protomux open
+as soon as the connection is up, so its first message proves at once. From there it is the same Protomux
+channel and protocol.
 
 The LAN responder and listener can be turned off in `host.json` for hosts on untrusted networks.
 
@@ -556,6 +584,10 @@ and frames travel on the worklet's stdout. The engine's entry routes `console.*`
 anything else loads. HoleBridge's Dart IPC client treats a malformed frame as fatal
 (`HB-IPC-DESYNC`) and restarts the worklet, because native code can still write to fd 1 directly.
 
+A worklet that exits without the app stopping it is restarted once by the app. The restarted engine
+has no registrations and no relay, so the next connect registers each host again and the relay is
+sent again with it. If the restart fails, the app shows `HB-ENGINE-DOWN` until a later restart works.
+
 ## Limits
 
 Anyone with the key can connect, so every resource is capped. Starting defaults, all configurable
@@ -567,8 +599,9 @@ in `host.json`, tuned during M2:
 | Streams per session | 128 | Browsers open many connections; still bounded |
 | Streams in total | 1024 | Bounds sockets and memory |
 | Target connect timeout | 10 s | A dead service answers `reject`, not a hung stream |
-| LAN handshake deadline | 5 s | A LAN connection that has not proven the client key by then is closed |
+| LAN handshake deadline | 5 s | A LAN connection that has not proven the client key by then is closed and counted as a refusal. Proof is the first message that decrypts under the session keys ([LAN route](#lan-route)) |
 | Unauthenticated LAN connections | 32 in total, 4 per source IP | Any device on the network can connect before proving the key; extras are closed at accept, counted, and logged at most once a minute |
+| Pre-proof LAN frame | 65535 bytes | Until its first message decrypts, a LAN connection may send no frame that names more; a longer length prefix closes it at once, counted as a refusal and logged with no key |
 | Receive window per stream | 2 MiB | Throughput on high-latency links (above) |
 | UDP flows | 256 per session, 4096 in total | Each flow holds a host-side socket |
 | UDP flow idle | 60 s, or the service's `idle` | Mirrors common NAT UDP timeouts |
@@ -603,8 +636,37 @@ the host's LAN addresses, so the next connect is fast.
 | Android (phone, TV) | With **VPN mode** on, the `VpnService` (a foreground service) keeps the service addresses up with no session, and a connection to one wakes the session. With no session it sends no network traffic. With VPN mode off, listeners exist only while the app is open. |
 | iPhone | With **VPN mode** on (M5), the packet tunnel extension does the same. Until then, only while the app is in the foreground, with no wake-on-connect. |
 
-**Reconnects.** When the session drops, the app finds a route again
-([Choosing a route](#choosing-a-route-app)), backing off from 1 s to 30 s with jitter.
+**Reconnects.** When the session drops, the app shows "looking" at once and finds a route again
+([Choosing a route](#choosing-a-route-app)). **Proposed; the owner may revise.**
+- **Backoff.** The next search starts after a delay of 1 s, doubling to 30 s. Each delay is a random
+  whole number of milliseconds between half of its nominal value and all of it, so the 30 s cap
+  holds. A route that comes up resets the backoff.
+- **Failures during the backoff.** A search that fails during the backoff continues it, including a
+  search that runs into the 60 s limit. A drop while a search is running does not start a second
+  search: the running search decides, and if it fails, the backoff applies.
+- **Route events.** The route badge follows the manager's `route` events. The manager emits one only
+  when the state or the session changes. "looking" and "can't reach" carry no session; LAN, direct
+  and relay carry the session that holds the route, which the sessions layer uses to reattach streams
+  after a reconnect or a LAN switch. A re-evaluation that finds nothing better re-emits the live route,
+  so the badge leaves "looking". While a session is live and a re-evaluation runs, the badge reads
+  "looking" (**owner to confirm**).
+- **Close.** The sessions layer stops a host's manager with `close()`: the timers stop, the live session
+  ends without counting as a drop, and a dial that answers later is destroyed. A connect still pending
+  then rejects with a plain error that has no HB code. The sessions layer rejects its waiting calls with a
+  plain Error that has no HB code, and the IPC layer (`index.js`, HoleBridge-hb5.23.7) picks the code for
+  the connect reply (`spec/ipc.md`).
+
+**Decided in the sessions layer (`lib/sessions.js`; the owner may revise).** Where the rules above are silent:
+- **Waiting callers** hold the session, as open streams do. The 5 minutes start only when no caller waits
+  and no stream is open.
+- **Registration.** The IPC connect registers the host. Its search runs until `close` for that host, or
+  until its session idles out.
+- **A search nobody uses.** A search that a local connection started, and that holds no session (it never
+  formed one, or its session dropped and did not come back), ends 5 minutes after its last caller gave up.
+  Failed searches the manager reports in the meantime do not restart the 5 minutes.
+- **Version mismatch.** The manager stops retrying. The next connect or local connection with no session
+  replaces it. While a local connection still waits on it, that connection waits and fails with the code at
+  its own 30 s deadline, and a connect that arrives then fails at once with the code.
 
 **Streams survive a reconnect and a route change (MVP).** A session is reliable while it lives, so
 bytes are only lost when it dies.
@@ -635,10 +697,10 @@ and drops close streams.
 ```
             tap tile / local connection, no session
  [idle] ─────────────────────────────────────────▶ [looking: LAN probe, then DHT]
-   ▲                                                   │ found          │ gave up (60 s)
+   ▲                                                   │ found          │ gave up (at most 60 s; at once if the lookup fails)
    │ 5 min after last stream closes                    ▼                ▼
    │                                              [connected:      [can't reach]
-   └──────────────────────────────────────────────  LAN|direct|relay]   │ retry after 30 s
+   └──────────────────────────────────────────────  LAN|direct|relay]   │ retry: 30 s on a first connect, backoff after a drop
                                                       │ path dies        └──▶ [looking]
                                                       ▼
                                        [resuming: sockets stall, 60 s grace]
@@ -655,7 +717,7 @@ tunnel to one host's named services, not a mesh.
 ```
  phone or TV                                                                  host
  Jellyfin app ──▶ jellyfin.living-room.internal
-                    │ DNS, answered by HoleBridge: 198.18.0.2
+                    │ DNS, answered by HoleBridge: 198.18.0.1:53
                     ▼
  VPN interface ──▶ network stack ──▶ engine ═══ session (LAN, direct, relay) ═══▶ 127.0.0.1:8096
  (198.18.0.0/16)    packets → TCP, UDP    streams, flows                         configured target
@@ -669,14 +731,16 @@ tunnel to one host's named services, not a mesh.
   with dashes, and editable. Hostnames a host owner listed in `origins` resolve to the service's
   address too. Any port on a service's address reaches that service's target.
 - **DNS.** The app answers queries for its names and forwards every other query, unread and
-  unlogged, to the network's normal DNS. iOS sends it only the matching domains; on Android every
-  query passes through it. Answers are IPv4 only.
+  unlogged, to the network's normal DNS. The DNS server address is 198.18.0.1, port 53; its queries
+  reach the app's one local SOCKS5 front as UDP ASSOCIATE datagrams. iOS sends it only the matching
+  domains; on Android every query passes through it. Answers are IPv4 only.
 - **Packets to streams.** A small user-space network stack in C turns packets back into TCP
-  connections and UDP flows and hands each to the engine's local listener for that service, as
-  tun2socks does. From there it is the same stream or flow as without VPN mode: same protocol, same
-  resume, same limits.
+  connections and UDP flows. It hands each one to the engine's one local SOCKS5 front on 127.0.0.1,
+  not to a listener per service. The front maps the destination address to the host and service, and
+  refuses an address no service has. From there it is the same stream or flow as without VPN mode:
+  same protocol, same resume, same limits.
 - **Sessions stay on demand.** VPN mode keeps the addresses up, not a session. A connection to a
-  service's address wakes the session as a connection to a local listener does
+  service's address wakes the session, as a connection to its local port does without VPN mode
   ([sessions](#sessions-and-reconnects)).
 - **Android.** `VpnService` runs in the app's process as its foreground service. Turning VPN mode
   on asks for the system's one-time VPN approval.

@@ -1,0 +1,21 @@
+{
+  "name": "holebridge-interop-js",
+  "version": "0.0.0",
+  "private": true,
+  "description": "JS dht-rpc peers for the Go interop tests in interop/, pinned to the spec/gen versions",
+  "license": "MIT",
+  "dependencies": {
+    "@hyperswarm/secret-stream": "6.9.2",
+    "compact-encoding": "3.5.2",
+    "dht-rpc": "6.27.0",
+    "hyperdht": "6.34.1",
+    "kademlia-routing-table": "1.0.6",
+    "protomux": "3.12.1",
+    "sodium-universal": "5.0.1",
+    "udx-native": "1.21.3"
+  },
+  "overrides": {
+    "bare-addon-resolve": "1.10.1",
+    "bare-module-resolve": "1.12.5"
+  }
+}

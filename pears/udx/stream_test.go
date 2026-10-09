@@ -2,6 +2,7 @@ package udx
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"io"
 	"math/rand/v2"
@@ -373,5 +374,94 @@ func TestCloseWriteWaitsForBlockedWrite(t *testing.T) {
 		}
 	case <-time.After(ioTimeout):
 		t.Fatal("CloseWrite did not return after the write")
+	}
+}
+
+// A 100 MiB transfer over loopback, Go to Go, moves every byte and both ends finish. The sender writes
+// in 1 MiB chunks, the receiver hashes what it reads. Before HoleBridge-85m.4.19 the sender stopped
+// about 1.3 MB in: its token bucket was empty, no pacing timer was armed, no ack came, and Write waited
+// for ever. The 30 s deadline covers the send and the receive together; HEAD takes about 1.3 s.
+func TestLargeLoopbackTransferDoesNotStall(t *testing.T) {
+	defer failOnPanic(t)
+	const total, chunk = 100 << 20, 1 << 20
+	connA, connB := loopbackUDP(t), loopbackUDP(t)
+	sockA, err := NewSocket(connA)
+	if err != nil {
+		t.Fatalf("NewSocket: %v", err)
+	}
+	defer sockA.Close()
+	sockB, err := NewSocket(connB)
+	if err != nil {
+		t.Fatalf("NewSocket: %v", err)
+	}
+	defer sockB.Close()
+	snd := sockA.NewStream(0x1001)
+	rcv := sockB.NewStream(0x2002)
+	defer snd.Destroy()
+	defer rcv.Destroy()
+	if err := snd.Connect(0x2002, connB.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if err := rcv.Connect(0x1001, connA.LocalAddr().(*net.UDPAddr)); err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+
+	data := payload(total)
+	want := sha256.Sum256(data)
+	type result struct {
+		n   int64
+		sum [sha256.Size]byte
+		err error
+	}
+	got := make(chan result, 1)
+	go func() {
+		h := sha256.New()
+		n, err := io.Copy(h, rcv)
+		var r result
+		r.n, r.err = n, err
+		copy(r.sum[:], h.Sum(nil))
+		got <- r
+	}()
+
+	start := time.Now()
+	deadline := time.After(30 * time.Second)
+	sendDone := make(chan error, 1)
+	go func() {
+		for off := 0; off < total; off += chunk {
+			if _, err := snd.Write(data[off : off+chunk]); err != nil {
+				sendDone <- err
+				return
+			}
+		}
+		sendDone <- snd.CloseWrite()
+	}()
+	select {
+	case err := <-sendDone:
+		if err != nil {
+			t.Fatalf("Write or CloseWrite of 100 MiB: %v", err)
+		}
+	case <-deadline:
+		snd.Destroy() // unblocks the stalled Write so the goroutine ends
+		rcv.Destroy()
+		t.Fatal("100 MiB Write did not return within 30 s: the sender stalled")
+	}
+	var r result
+	select {
+	case r = <-got:
+	case <-deadline:
+		rcv.Destroy()
+		t.Fatal("100 MiB read did not finish within 30 s")
+	}
+	elapsed := time.Since(start).Round(time.Millisecond)
+	snd.mu.Lock()
+	lost := snd.lost
+	snd.mu.Unlock()
+	t.Logf("100 MiB Go to Go: %v, sender Stream.lost %d, Dropped sender socket %d, receiver socket %d",
+		elapsed, lost, sockA.Dropped(), sockB.Dropped())
+	if r.err != nil || r.n != total {
+		t.Fatalf("received %d of %d bytes, err %v", r.n, total, r.err)
+	}
+	if r.sum != want {
+		t.Fatal("received bytes differ from the bytes sent")
 	}
 }

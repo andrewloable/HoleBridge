@@ -30,8 +30,10 @@ jobs:
       - name: Vet
         run: go vet ./...
       # pears/udx alone takes about 4 minutes; the 10 minute limit leaves room on slower runners.
+      # The interop tests need npm ci in interop/js and run in interop.yml, so this step leaves them out.
       - name: Test
-        run: go test -timeout 10m ./...
+        shell: bash
+        run: go list ./... | grep -v '/interop$' | xargs go test -timeout 10m
       - name: Repo guards
         if: runner.os == 'Linux'
         run: |

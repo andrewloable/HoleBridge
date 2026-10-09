@@ -606,6 +606,12 @@ func (st *Stream) own() *Session {
 	return st.owner.Load()
 }
 
+// InSession reports whether the stream is in session s now. A reattach moves a stream to the session that takes
+// it over, so a caller that counts streams per session asks this to find the session that owns the stream.
+func (st *Stream) InSession(s *Session) bool {
+	return st.owner.Load() == s
+}
+
 // lock locks the session the stream is in and returns it locked.
 func (st *Stream) lock() *Session {
 	s := st.own()

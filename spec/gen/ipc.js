@@ -57,6 +57,12 @@ const PORT = struct([
   ['service', c.string],
   ['port', c.uint]
 ])
+// A service the host shares: its name, then its kind in the handshake's numbering (0 unknown, 1 https,
+// 2 http, 3 tcp, 4 udp; spec/ipc.md, Encoding).
+const SERVICE = struct([
+  ['name', c.string],
+  ['kind', c.uint]
+])
 const NAT = struct([
   ['host', c.string],
   ['port', c.uint],
@@ -261,20 +267,24 @@ const EVENTS = [
     name: 'services',
     enc: struct([
       ['host', c.string],
-      ['list', c.array(c.string)],
+      ['list', c.array(SERVICE)],
       ['ports', c.array(PORT)]
     ]),
     examples: [
       {
         host: 'living-room',
-        list: ['web', 'ssh', 'dns'],
+        list: [
+          { name: 'web', kind: 1 },
+          { name: 'ssh', kind: 3 },
+          { name: 'dns', kind: 4 }
+        ],
         ports: [
           { service: 'web', port: 8080 },
           { service: 'ssh', port: 22 },
           { service: 'dns', port: 53 }
         ]
       },
-      { host: 'office', list: [], ports: [] }
+      { host: 'office', list: [{ name: 'printer', kind: 0 }], ports: [] }
     ]
   },
   {
@@ -347,7 +357,7 @@ const REPLY = {
     ['code', c.string],
     ['detail', c.string],
     ['route', c.string],
-    ['services', c.array(c.string)],
+    ['services', c.array(SERVICE)],
     ['ports', c.array(PORT)]
   ]),
   examples: [
@@ -357,7 +367,10 @@ const REPLY = {
       code: '',
       detail: '',
       route: 'direct',
-      services: ['web', 'ssh'],
+      services: [
+        { name: 'web', kind: 2 },
+        { name: 'ssh', kind: 3 }
+      ],
       ports: [
         { service: 'web', port: 8080 },
         { service: 'ssh', port: 22 }

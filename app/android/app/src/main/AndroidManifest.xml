@@ -2,6 +2,12 @@
     xmlns:tools="http://schemas.android.com/tools">
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.CAMERA"/>
+    <!-- VPN mode: the VPN service runs in the foreground. From Android 14 (API 34) it needs its
+         foreground service type's permission too; systemExempted is the type for VPN apps. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED"/>
+    <!-- Reads the DNS servers of the active network (ConnectivityManager). -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <!-- QR scanning is optional, so the app still installs on a device without a camera. -->
     <uses-feature android:name="android.hardware.camera" android:required="false"/>
     <!-- Android TV and Google TV: the same APK runs there, so neither feature is required. -->
@@ -45,6 +51,17 @@
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- VPN mode. The service's permission is held only by the system, so no other app can
+             start or bind it. The intent filter's action is what the system binds to. -->
+        <service
+            android:name=".vpn.HoleBridgeVpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="systemExempted"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.net.VpnService"/>
+            </intent-filter>
+        </service>
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

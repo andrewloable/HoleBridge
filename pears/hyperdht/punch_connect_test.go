@@ -2,13 +2,16 @@ package hyperdht
 
 import (
 	"context"
+	"errors"
 	"net"
 	"slices"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/andrewloable/HoleBridge/pears/dhtrpc"
+	"github.com/andrewloable/HoleBridge/pears/udx"
 )
 
 // Expected values come from hyperdht 6.34.1 (lib/connect.js, lib/holepuncher.js, lib/server.js and lib/nat.js), as
@@ -293,4 +296,101 @@ func TestConnectPunchesToServer(t *testing.T) {
 	c := dial(t, client, host.Public, ConnectOptions{KeyPair: &kp})
 	s := awaitAccept(t, accepted, readWait)
 	exchange(t, c, s)
+}
+
+// readStep is one scripted read of a scriptedPacketConn: the datagram the read returns, the address it came from,
+// and the error it returns.
+type readStep struct {
+	data []byte
+	from net.Addr
+	err  error
+}
+
+// scriptedPacketConn stands in for the raw side of a birthday socket. Each ReadFrom returns the next step of steps.
+// Once steps is closed, a read returns net.ErrClosed, as a closed socket does. Only ReadFrom is used.
+type scriptedPacketConn struct {
+	net.PacketConn
+	steps chan readStep
+}
+
+func (c *scriptedPacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	st, ok := <-c.steps
+	if !ok {
+		return 0, nil, net.ErrClosed
+	}
+	return copy(p, st.data), st.from, st.err
+}
+
+// startReadPunches runs readPunches on s in a goroutine. The returned channel closes when readPunches returns.
+func startReadPunches(s *dhtPunchSocket) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.readPunches()
+	}()
+	return done
+}
+
+// awaitReturn fails the test unless done closes within birthdayWait.
+func awaitReturn(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(birthdayWait):
+		t.Fatal("readPunches did not return once the socket closed")
+	}
+}
+
+// A Windows ICMP reset makes one read of a birthday socket fail with WSAECONNRESET. That must not stop the punch
+// reader: the one-byte datagram after the failed read still reaches the handler. dhtrpc's read loop skips the same
+// error.
+func TestReadPunchesSurvivesReadError(t *testing.T) {
+	reset := &net.OpError{Op: "read", Net: "udp", Err: syscall.ECONNRESET}
+	sender := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 9}
+	steps := make(chan readStep, 2)
+	steps <- readStep{err: reset}
+	steps <- readStep{data: []byte{0}, from: sender}
+	got := make(chan *net.UDPAddr, 1)
+	s := &dhtPunchSocket{
+		raw:     &scriptedPacketConn{steps: steps},
+		handler: func(from *net.UDPAddr) { got <- from },
+	}
+	done := startReadPunches(s)
+	select {
+	case from := <-got:
+		if addressOf(from) != addressOf(sender) {
+			t.Errorf("the handler got a punch from %v, want %v", from, sender)
+		}
+	case <-time.After(birthdayWait):
+		t.Fatal("the punch reader stopped at the read error: the one-byte datagram after it never reached the handler")
+	}
+	close(steps)
+	awaitReturn(t, done)
+}
+
+// A closed birthday socket ends its punch reader. That holds whether the raw side reports net.ErrClosed or another
+// error on a socket that is already marked closed. The reader must return rather than spin on the closed socket.
+func TestReadPunchesEndsWhenSocketCloses(t *testing.T) {
+	t.Run("the raw side reports net.ErrClosed", func(t *testing.T) {
+		steps := make(chan readStep, 1)
+		steps <- readStep{err: net.ErrClosed}
+		s := &dhtPunchSocket{raw: &scriptedPacketConn{steps: steps}}
+		awaitReturn(t, startReadPunches(s))
+	})
+	t.Run("another error on a socket already marked closed", func(t *testing.T) {
+		steps := make(chan readStep, 1)
+		steps <- readStep{err: errors.New("use of closed network connection")}
+		s := &dhtPunchSocket{raw: &scriptedPacketConn{steps: steps}, closed: true}
+		awaitReturn(t, startReadPunches(s))
+	})
+	t.Run("a real birthday socket", func(t *testing.T) {
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		must(t, err)
+		ud, err := udx.NewSocket(conn)
+		must(t, err)
+		s := &dhtPunchSocket{conn: conn, ud: ud, raw: ud.Raw()}
+		done := startReadPunches(s)
+		s.closeSocket()
+		awaitReturn(t, done)
+	})
 }

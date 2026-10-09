@@ -52,7 +52,7 @@ them (decisions Q8).
 | `holebridge relay --new-key` | Create `relay.key` in the config directory with mode `0600` (the key as `XXX-XXX-XXX` and a newline), and print the key once. |
 | `holebridge relay` | Run a relay with the key in `relay.key`. |
 | `holebridge relay check <relay-key-file>` | Test a relay from another machine with the same `app.key`: a member is let in, a stranger turned away. |
-| `holebridge status` | M3: what a running host or relay is doing. |
+| `holebridge status` | M3: what a running host is doing, from its control socket: its services and kinds, its NAT state, whether a relay is set, and its live sessions. Each session is one row with its route (`lan`, `direct` for one over the DHT, or `relay` for one whose stream came through a relay), its open streams and UDP flows, and the bytes it carried in and out. The output holds no key and no target address. |
 
 Global options: `--config <dir>`, `--log-level <error|warn|info|debug>`, `--version`, `--help`.
 
@@ -92,7 +92,7 @@ $ holebridge service add jellyfin 8096
 $ holebridge service add ssh 22 --kind tcp
 $ holebridge service add dns 53 --kind udp
 $ holebridge host
-Hosting 4 services: web (https), jellyfin (http), ssh (tcp), dns (udp)
+Hosting 4 services: dns (udp), jellyfin (http), ssh (tcp), web (https)
 Key: 7KQ-M4X-9TR
      ▄▄▄▄▄▄▄ ▄▄ ▄▄▄▄▄▄▄
      █ ▄▄▄ █ ▄█ █ ▄▄▄ █      Scan with your phone, or open:
@@ -102,6 +102,8 @@ LAN: listening on 192.168.1.10
 Internet: reachable (NAT: consistent)
 Relay: none set
 ```
+
+The Hosting line lists the services sorted by name, not in the order they were added.
 
 **The QR code and link carry both halves of the key after the `#`:** the 9 symbols and the
 deployment's application key (`https://holebridge.app/k#7KQM4X9TR.<application key>`). Browsers
@@ -157,6 +159,10 @@ walkthrough is [relay.md](relay.md).
 
 `--config <dir>` or `HOLEBRIDGE_CONFIG` overrides it. Two hosts on one machine use two directories
 and two sets of LAN ports; a port already taken fails with `HB-LAN-PORT-IN-USE` and the fix.
+
+`HOLEBRIDGE_BOOTSTRAP` takes a comma-separated list of `host:port` nodes and replaces the public
+bootstrap nodes that `host`, `share`, `relay` and `relay check` use, as `--bootstrap` does for the
+relay commands. It is for testing on a private network only.
 
 ### `host.json`
 
@@ -228,7 +234,8 @@ Living room server                                   ● LAN
 ```
 
 - **Route badge:** LAN, Direct or Relay. "Looking for host..." while a lookup runs; "Can't reach
-  host" (with its error code) only when it has given up. The app retries on its own.
+  host" (with its error code) only when a lookup has given up: at once when it fails at once, or
+  after at most 60 s when no host answers. The app retries on its own.
 - **Open** loads the service in the in-app browser with the matching scheme
   ([in-app browser](architecture.md#the-in-app-browser)). On Linux desktop it uses the system
   browser. On a TV the browser has a D-pad cursor.

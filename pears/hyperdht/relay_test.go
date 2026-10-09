@@ -311,3 +311,42 @@ func TestForcedRelayPathCarriesData(t *testing.T) {
 	relayed.awaitAdmitted(t, tn.Nodes[9].keyPair.Public, relayPairWait)
 	relayed.awaitAdmitted(t, tn.Nodes[0].keyPair.Public, relayPairWait)
 }
+
+// Route of an accepted connection (HoleBridge-awf.8): Relayed reports whether the stream was claimed through a relay
+// pairing. With the seams forcing the relay path on both ends, the stream can only be claimed by a pairing, so
+// Relayed is true. On loopback with no relay offered, the direct claim takes the stream, so Relayed is false.
+func TestAcceptedConnRelayedReportsRoute(t *testing.T) {
+	t.Run("a stream claimed through a relay pairing is relayed", func(t *testing.T) {
+		tn := startTestnet(t, 10)
+		relayKP := testKeyPair(7)
+		startRelay(t, tn.Nodes[1], relayKP, nil)
+		host := testKeyPair(3)
+		client := testKeyPair(5)
+		tn.Nodes[0].forceRelay = true
+		srv := newServer(t, tn.Nodes[0], ServerOptions{})
+		listenOn(t, srv, host)
+		accepted := acceptNext(srv)
+		tn.Nodes[9].forceRelay = true
+		c := dial(t, tn.Nodes[9], host.Public, ConnectOptions{KeyPair: &client, RelayThrough: always(relayKP.Public)})
+		s := awaitAcceptConn(t, accepted, readWait)
+		if !s.Relayed() {
+			t.Error("Relayed() = false for a stream claimed through a relay pairing, want true")
+		}
+		exchange(t, c, s.Conn)
+	})
+
+	t.Run("a stream claimed on the direct path is not relayed", func(t *testing.T) {
+		tn := startTestnet(t, 10)
+		host := testKeyPair(3)
+		client := testKeyPair(5)
+		srv := newServer(t, tn.Nodes[0], ServerOptions{})
+		listenOn(t, srv, host)
+		accepted := acceptNext(srv)
+		c := dial(t, tn.Nodes[9], host.Public, ConnectOptions{KeyPair: &client})
+		s := awaitAcceptConn(t, accepted, readWait)
+		if s.Relayed() {
+			t.Error("Relayed() = true for a stream claimed on the direct path, want false")
+		}
+		exchange(t, c, s.Conn)
+	})
+}

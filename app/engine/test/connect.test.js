@@ -10,6 +10,7 @@ const { load, hex } = require('./helpers/vectors.js')
 const { createFakeHost, createEchoServer } = require('./helpers/fake-host.js')
 const { connectDirect } = require('../lib/connect.js')
 const protocol = require('../lib/protocol.js')
+const { createServer, decode } = require('../lib/ipc.js')
 
 const MIB = 1024 * 1024
 // SETTLE bounds each wait, so a step that never finishes fails its test with a message.
@@ -139,6 +140,43 @@ test('connectDirect resolves with the host services, lan block and flags', catch
         )
         t.alike(session.lan, { addresses: ['192.0.2.10'], port: 8443 }, 'lan is the host lan block')
         t.is(session.flags, protocol.FLAG.lan, 'flags are the host handshake flags')
+      } finally {
+        session.destroy()
+      }
+    }
+  )
+}))
+
+test('a handshake kind reaches the services event with the same number', catchThrows(async (t) => {
+  await withHost(
+    {
+      services: [
+        { name: 'web', kind: 'https', target: { port: 8443 } },
+        { name: 'ssh', kind: 'tcp', target: 'refuse' }
+      ]
+    },
+    async ({ dht }) => {
+      const session = await connect(dht)
+      try {
+        const frames = []
+        const server = createServer({ send: (frame) => frames.push(frame), handlers: {} })
+        // The services event lists the handshake's entries as name and kind (spec/ipc.md, services).
+        server.emit('services', {
+          host: 'living-room',
+          list: session.services.map(({ name, kind }) => ({ name, kind })),
+          ports: []
+        })
+        t.is(frames.length, 1, 'one services event is sent')
+        const msg = decode(frames[0])
+        t.is(msg.name, 'services', 'the event is services')
+        t.alike(
+          msg.body.list,
+          [
+            { name: 'web', kind: protocol.KIND.https },
+            { name: 'ssh', kind: protocol.KIND.tcp }
+          ],
+          'each entry carries the kind the host sent in its handshake'
+        )
       } finally {
         session.destroy()
       }

@@ -193,7 +193,7 @@ func acceptAsync(srv *hyperdht.Server) <-chan *hyperdht.Conn {
 	go func() {
 		c, err := srv.Accept()
 		if err == nil {
-			ch <- c
+			ch <- c.Conn // Accept returns the Conn with the route it came by; these tests need only the Conn
 		}
 	}()
 	return ch
@@ -245,11 +245,14 @@ func exchange(t *testing.T, client, server *hyperdht.Conn) {
 
 // pairThroughRelay makes a host and a client, both with member as their DHT default key pair. Both offer the
 // relay with relayPub, the client dials the host, and data goes both ways. The relay pairs the two sides on its
-// blind relay, so its pairing count goes up.
+// blind relay, so its pairing count goes up. The relay test seam (ForceRelayForTest) takes the direct path out
+// of both nodes, so the bytes cross the relay on every run, not only when the relayed reply loses the race.
 func pairThroughRelay(t *testing.T, tn *hyperdht.Testnet, relayPub [32]byte, member noise.KeyPair) {
 	t.Helper()
 	hostDHT := newDHT(t, tn, &member)
 	clientDHT := newDHT(t, tn, &member)
+	hyperdht.ForceRelayForTest(t, hostDHT)
+	hyperdht.ForceRelayForTest(t, clientDHT)
 	hostKP := randomKeyPair(t)
 	srv := hostDHT.CreateServer(hyperdht.ServerOptions{RelayThrough: always(relayPub)})
 	t.Cleanup(func() { srv.Close() })

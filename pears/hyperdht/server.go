@@ -5,14 +5,19 @@
 // The HyperDHT server. Listen announces the key pair on the hash of its public key, and keeps a route to
 // the server on this node, so the handshakes that reach this node are answered here (router.go). The
 // firewall decides each handshake once. An admitted client gets the server's reply, and a UDX stream on the
-// node's socket is connected to the client, which the secret stream runs over, as upstream's server does for
-// a direct connection. The reply also names a holepunch id and the relays the record is stored on. Each
-// admitted handshake has a puncher (setupHolepuncher): a PEER_HOLEPUNCH for its id is answered from the
-// puncher's NAT samples (answerHolepunch), and the puncher punches toward the client when the client asks.
-// Its relay policy (relay.go) names the relay in each reply. A relayed handshake also pairs on that relay, but
-// the direct stream claims the connection first; only a forced server (the test seam dht.forceRelay) lets the
-// paired relay claim it, and then no direct stream is made. A forced punch (dht.forcePunch) claims the stream
-// only through the puncher, when the client's punch arrives from an address it named.
+// node's socket is made for it, which the secret stream runs over. The reply also names a holepunch id and the
+// relays the record is stored on. Each admitted handshake has a puncher (setupHolepuncher): a PEER_HOLEPUNCH for
+// its id is answered from the puncher's NAT samples (answerHolepunch), and the puncher punches toward the client
+// when the client asks. Its relay policy (relay.go) names the relay in each reply.
+//
+// The stream is claimed as upstream's server claims it (lib/server.js). A handshake that came direct, or from an
+// open client, is claimed at admission, at the address the client has. Any other handshake that came through a
+// relay is claimed only by its puncher, when a holepunch datagram arrives from an address the client named, or by
+// its relay pairing, whichever lands first. A stream that neither claims is given up when its handshake clears.
+// Upstream's raw stream also claims on the first packet from an address the relay did not name; that hook is not
+// ported, since the puncher's datagram from the client's address is what claims a relayed stream here.
+// The test seams take the direct claim out: dht.forceRelay lets only a relay pairing claim the stream, and
+// dht.forcePunch lets only the puncher claim it.
 package hyperdht
 
 import (
@@ -90,9 +95,21 @@ var ErrKeyPairAlreadyUsed = errors.New("hyperdht: key pair already used by a ser
 // carries it.
 type HandshakePayload = NoisePayload
 
-// Conn is an accepted connection: a secret stream over a UDX stream. RemotePublicKey returns the key the
-// client proved in its handshake.
+// Conn is a connection: a secret stream over a UDX stream. RemotePublicKey returns the key the client proved in
+// its handshake.
 type Conn = secretstream.Stream
+
+// AcceptedConn is a connection that Server.Accept returns: the Conn, and the route its stream came by.
+type AcceptedConn struct {
+	*Conn
+	relayed bool // the stream was claimed through a relay pairing, not on the direct path or by a hole punch
+}
+
+// Relayed reports whether the connection's stream was claimed through a relay pairing, whichever side offered the
+// relay, rather than on the direct path or through a hole punch. It is set before the connection is handed to Accept.
+func (c *AcceptedConn) Relayed() bool {
+	return c.relayed
+}
 
 // ServerOptions sets up a server. Firewall is called once for each handshake that reaches the server, with
 // the key the client proved and the client's payload. It returns true to refuse the handshake. A refused
@@ -128,7 +145,7 @@ type Server struct {
 	relays        []RelayInfo               // the nodes the record was stored on by the last announce
 	holepunches   map[uint64]*holepunchSlot // the holepunch state of each admitted handshake, by its id
 	nextHolepunch uint64
-	conns         chan *Conn
+	conns         chan *AcceptedConn
 }
 
 // CreateServer returns a server on d. Nothing is announced until Listen. The server is closed by Close on d;
@@ -144,7 +161,7 @@ func (d *DHT) CreateServer(opts ServerOptions) *Server {
 		cancel:       cancel,
 		handshakes:   make(map[string][]byte),
 		holepunches:  make(map[uint64]*holepunchSlot),
-		conns:        make(chan *Conn),
+		conns:        make(chan *AcceptedConn),
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -262,7 +279,7 @@ func (s *Server) Close() error {
 
 // Accept returns the next connection whose handshake the firewall admitted, once its secret stream's header
 // exchange is done. It returns an error once the server is closed.
-func (s *Server) Accept() (*Conn, error) {
+func (s *Server) Accept() (*AcceptedConn, error) {
 	select {
 	case c := <-s.conns:
 		return c, nil
@@ -309,10 +326,11 @@ func (s *Server) answer(msg []byte, from *net.UDPAddr, direct bool) []byte {
 // admit reads the client's handshake message, asks the firewall about the key the client proves, and returns
 // the server's Noise reply. The reply carries the error code of the handshake, as upstream's does: a client
 // with no UDX info, or a payload of another version, gets an error code and not a silence. An admitted client
-// with UDX info gets a UDX stream on this node, connected to the client's stream at from, whose id is in the
-// reply, and serve runs the secret stream over it once the reply is sent. It returns nil when the message
-// does not verify, the firewall refuses the client, or the stream cannot be made. direct says whether the
-// handshake came straight from the client; a relayed one also pairs on the relay (upstream's _relayConnection).
+// with UDX info gets a UDX stream on this node, whose id is in the reply. A stream of a handshake that came direct, or
+// from an open client, is connected to the client's stream at from at once, and serve runs the secret stream over it
+// after the reply is sent. Any other relayed stream is claimed later, by its puncher or its relay pairing (see the
+// package comment). It returns nil when the message does not verify, the firewall refuses the client, or the stream
+// cannot be made. direct says whether the handshake came straight from the client.
 func (s *Server) admit(kp noise.KeyPair, msg []byte, from *net.UDPAddr, direct bool) []byte {
 	hs := noise.NewResponder(kp, nsPeerHandshake[:])
 	body, err := hs.Recv(msg)
@@ -345,6 +363,10 @@ func (s *Server) admit(kp noise.KeyPair, msg []byte, from *net.UDPAddr, direct b
 	udxInfo := UDXInfo{Version: 1}
 	cl := &streamClaim{}
 	punched := s.d.forcePunch // only the puncher claims the stream (forcePunch)
+	// claimNow says whether the stream is claimed at admission, at the address the client has. Upstream claims at once a
+	// handshake that came direct, or whose client is open (firewall OPEN), and no other: a relayed handshake waits for its
+	// puncher or its relay pairing. A forced or punched stream never claims at admission.
+	claimNow := false
 	// fail returns no reply, and drops the stream made for this handshake.
 	fail := func() []byte {
 		if st != nil {
@@ -357,10 +379,8 @@ func (s *Server) admit(kp noise.KeyPair, msg []byte, from *net.UDPAddr, direct b
 		if forced && offer == nil && p.RelayThrough == nil {
 			return fail() // a forced stream is claimed only through a relay, and this handshake names none
 		}
-		if !forced && !punched {
-			// The direct path claims the stream at once, as upstream does for a handshake that comes direct. A
-			// forced stream waits for its relay pairing, which claims it once the reply is out, and a punched one
-			// waits for the puncher.
+		claimNow = !forced && !punched && (direct || p.Firewall == firewallOpen)
+		if claimNow {
 			if err := st.Connect(uint32(p.UDX.ID), from); err != nil {
 				return fail()
 			}
@@ -387,30 +407,23 @@ func (s *Server) admit(kp noise.KeyPair, msg []byte, from *net.UDPAddr, direct b
 	if st != nil {
 		_, _, hash, _ := hs.Result()
 		keys := keysOf(hs)
-		slot := s.keepHolepunchWith(holepunchID, punchSecret(hash), offer != nil)
-		s.setupHolepuncher(slot, &p, st, keys, cl)
+		slot := s.keepHolepunchWith(holepunchID, punchSecret(hash), offer != nil, st, cl)
+		s.setupHolepuncher(slot, &p, st, keys, cl, !forced || punched)
 		if punched {
 			return out
 		}
-		if forced {
-			// The relay claims the stream: this side's own relay as initiator, else the one the client offered.
-			if offer != nil {
-				go s.serveRelayed(st, cl, *offer, true, keys)
-			} else {
-				go s.serveRelayed(st, cl, offerOf(p.RelayThrough), false, keys)
-			}
+		if claimNow {
+			go s.serve(st, keys, false)
 			return out
 		}
-		go s.serve(st, keys)
-		// A relayed handshake also pairs on the relay, as upstream does. The direct stream has claimed already, so
-		// the pairing gives itself up when it lands.
-		if !direct {
-			switch {
-			case offer != nil:
-				go s.d.pairRelay(s.ctx, cl, st, *offer, true)
-			case p.RelayThrough != nil:
-				go s.d.pairRelay(s.ctx, cl, st, offerOf(p.RelayThrough), false)
-			}
+		// A relayed stream waits for its puncher, or for its relay pairing, whichever claims it first (upstream's
+		// _relayConnection). The pairing runs where the reply names a relay: this side's own as initiator, else the one the
+		// client offered as responder.
+		switch {
+		case offer != nil:
+			go s.serveRelayed(st, cl, *offer, true, keys)
+		case p.RelayThrough != nil:
+			go s.serveRelayed(st, cl, offerOf(p.RelayThrough), false, keys)
 		}
 	}
 	return out
@@ -439,12 +452,15 @@ type holepunchSlot struct {
 // keepHolepunch keeps the holepunch slot of an admitted handshake under id, for handshakeClearWait, as upstream
 // keeps a handshake's holepunch slot. Its puncher is stopped when the slot goes.
 func (s *Server) keepHolepunch(id uint64, secret [32]byte) *holepunchSlot {
-	return s.keepHolepunchWith(id, secret, false)
+	return s.keepHolepunchWith(id, secret, false, nil, nil)
 }
 
-// keepHolepunchWith is keepHolepunch for a handshake whose reply offered a relay (relayToken). The flag is set before
-// the slot is published, so no probe reads it unset.
-func (s *Server) keepHolepunchWith(id uint64, secret [32]byte, relayToken bool) *holepunchSlot {
+// keepHolepunchWith is keepHolepunch for a handshake whose reply offered a relay (relayToken), with the stream st its
+// claim cl guards. The flag is set before the slot is published, so no probe reads it unset. When the slot goes, a
+// stream that nothing has claimed is given up, so a handshake that never connects holds no stream (upstream's
+// handshake clear destroys a relayed stream that no puncher or relay took). Taking the claim here also keeps a path
+// that is still pending from claiming a stream that is given up.
+func (s *Server) keepHolepunchWith(id uint64, secret [32]byte, relayToken bool, st *udx.Stream, cl *streamClaim) *holepunchSlot {
 	slot := &holepunchSlot{sp: newSecurePayload(secret), relayToken: relayToken}
 	s.mu.Lock()
 	s.holepunches[id] = slot
@@ -459,18 +475,22 @@ func (s *Server) keepHolepunchWith(id uint64, secret [32]byte, relayToken bool) 
 		if p != nil {
 			p.destroy()
 		}
+		if st != nil && cl != nil && cl.take() {
+			st.Destroy()
+		}
 	})
 	return slot
 }
 
 // setupHolepuncher makes the puncher of an admitted handshake, as upstream's setupHolepuncher does. The puncher
 // answers the client's probes and punches toward the addresses the client names. Its NAT samples are pings to a
-// few nodes, taken in the background; answerHolepunch waits for them. When the DHT's connections are punched
-// only (forcePunch), the puncher also claims the stream: a holepunch datagram from an address the client named
-// connects the stream to that address, and the secret stream runs over it.
-func (s *Server) setupHolepuncher(slot *holepunchSlot, p *NoisePayload, st *udx.Stream, keys secretstream.Keys, cl *streamClaim) {
-	cfg := punchConfig{Pool: s.d.punchPool(), RemoteFirewall: p.Firewall, Gate: s.d.gate()}
-	if s.d.forcePunch {
+// few nodes, taken in the background; answerHolepunch waits for them. When claimByPunch is set, the puncher also
+// claims the stream (upstream's onsocket on the puncher's onconnect): a holepunch datagram from an address the client
+// named connects the stream to that address, on the socket it arrived on, and the secret stream runs over it. A
+// forced server leaves the claim to its relay, so claimByPunch is false there unless the punch seam is set too.
+func (s *Server) setupHolepuncher(slot *holepunchSlot, p *NoisePayload, st *udx.Stream, keys secretstream.Keys, cl *streamClaim, claimByPunch bool) {
+	cfg := punchConfig{Pool: s.d.punchPool(), RemoteFirewall: p.Firewall, Gate: s.d.gate(), Sample: s.d.sampleSocket}
+	if claimByPunch {
 		cfg.OnPunchFrom = func(sock punchSocket, from *net.UDPAddr) {
 			if !cl.take() {
 				return
@@ -486,7 +506,7 @@ func (s *Server) setupHolepuncher(slot *holepunchSlot, p *NoisePayload, st *udx.
 			if hp != nil {
 				hp.destroy() // the stream runs on its socket now: the node's handle or a kept birthday socket
 			}
-			go s.serve(conn, keys)
+			go s.serve(conn, keys, false)
 		}
 	}
 	hp := newHolepuncher(cfg)
@@ -503,12 +523,17 @@ func (s *Server) setupHolepuncher(slot *holepunchSlot, p *NoisePayload, st *udx.
 
 // observeProbe takes a NAT sample for the puncher of handshake id from a relayed probe: seen is the address the relay
 // gives the server (the probe's to), and from is the relay that forwarded the probe (upstream _onpeerholepunch,
-// p.nat.add(req.to, req.from)). It does nothing for an unknown id.
+// p.nat.add(req.to, req.from)). It does nothing for an unknown id. Upstream takes the sample only when the probe came in
+// on the puncher's own socket, so once the puncher has reopened onto a birthday socket the relayed probe is no sample of
+// that socket; a probe comes in on the node's socket.
 func (s *Server) observeProbe(id uint64, seen, from Address) {
 	s.mu.Lock()
 	slot := s.holepunches[id]
 	s.mu.Unlock()
 	if slot == nil || slot.p == nil {
+		return
+	}
+	if sock := slot.p.probeSocket(); sock == nil || birthdayOf(sock) != nil {
 		return
 	}
 	slot.p.observe(seen, from)
@@ -588,6 +613,19 @@ func (s *Server) answerWithPuncher(slot *holepunchSlot, p *holepuncher, sampled 
 		case <-time.After(natAnalysisWait):
 		case <-s.ctx.Done():
 			return nil
+		}
+	}
+	// An unstable NAT is reopened on a fresh socket, unless the client is punching already (upstream _onpeerholepunch:
+	// analyze(false), then analyze(true) when the client is not punching). A socket that stays unstable aborts the punch.
+	stable, _ := p.analyze(s.ctx, false)
+	if _, _, remotePunching := p.firewalls(); !remotePunching && !stable {
+		var err error
+		stable, err = p.analyze(s.ctx, true)
+		if p.destroyed() {
+			return nil
+		}
+		if err != nil || !stable {
+			return s.abortPunch(slot, p, remote.Round)
 		}
 	}
 	// Fast open: a consistent NAT whose address the client names as its session target punches back at once, so the
@@ -705,29 +743,32 @@ func (s *Server) isRelayLocked(addr *net.UDPAddr) bool {
 }
 
 // serveRelayed claims st through a relay pairing (pairRelay) on the relay offer r, as initiator or responder, and
-// serves the claimed stream. A pairing that fails gives st up.
+// serves the claimed stream once the pairing lands. A pairing that fails, or that loses the claim to the puncher or the
+// direct path, serves nothing and leaves st alone: st is given up when its handshake clears, unless a path claims it first.
 func (s *Server) serveRelayed(st *udx.Stream, cl *streamClaim, r relayOffer, initiator bool, keys secretstream.Keys) {
 	rs, _, err := s.d.pairRelay(s.ctx, cl, st, r, initiator)
 	if err != nil {
-		st.Destroy()
 		return
 	}
-	s.serve(rs, keys)
+	// pairRelay returns only once it has taken the stream's claim, so this stream is the one that won it.
+	s.serve(rs, keys, true)
 }
 
 // serve runs the secret stream over conn, the stream of an admitted handshake, and hands the connection to Accept
-// once the header exchange is done. The exchange has headerExchangeWait. A client that does not finish it in time
+// once the header exchange is done. relayed says whether conn was claimed through a relay pairing, and is set on the
+// connection before it is handed over. The exchange has headerExchangeWait. A client that does not finish it in time
 // has its stream closed, since Handshake closes the stream when its context ends, and so does a server that closes
 // first.
-func (s *Server) serve(conn io.ReadWriteCloser, keys secretstream.Keys) {
+func (s *Server) serve(conn io.ReadWriteCloser, keys secretstream.Keys, relayed bool) {
 	ctx, cancel := context.WithTimeout(s.ctx, headerExchangeWait)
 	defer cancel()
 	c := secretstream.Resume(conn, false, secretstream.Options{Keepalive: s.keepalive}, keys)
 	if err := c.Handshake(ctx); err != nil {
 		return // Handshake has closed the stream
 	}
+	ac := &AcceptedConn{Conn: c, relayed: relayed}
 	select {
-	case s.conns <- c:
+	case s.conns <- ac:
 	case <-s.ctx.Done():
 		c.Close()
 	}

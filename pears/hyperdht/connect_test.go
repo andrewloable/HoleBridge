@@ -55,7 +55,7 @@ func dialErr(t *testing.T, d *DHT, pk [32]byte, opts ConnectOptions, wait time.D
 
 // acceptResult is what one call to Accept returned.
 type acceptResult struct {
-	c   *Conn
+	c   *AcceptedConn
 	err error
 }
 
@@ -73,6 +73,12 @@ func acceptNext(srv *Server) <-chan acceptResult {
 // awaitAccept returns the connection that acceptNext delivers on ch, and closes it when the test ends. It
 // fails the test when Accept fails, or when no connection arrives within d.
 func awaitAccept(t *testing.T, ch <-chan acceptResult, d time.Duration) *Conn {
+	t.Helper()
+	return awaitAcceptConn(t, ch, d).Conn
+}
+
+// awaitAcceptConn is awaitAccept for the accepted connection itself, with its route.
+func awaitAcceptConn(t *testing.T, ch <-chan acceptResult, d time.Duration) *AcceptedConn {
 	t.Helper()
 	select {
 	case r := <-ch:
