@@ -1,0 +1,214 @@
+{
+  "description": "dht-rpc requests and responses: each optional field present and absent, closer nodes, error codes and a value. Byte 0 is (type << 4) | 3, then the flags, tid, the address and the optional fields in the order the flags name",
+  "reference": "dht-rpc 6.27.0",
+  "requests": [
+    {
+      "name": "ping",
+      "tid": 4660,
+      "to": {
+        "host": "198.51.100.20",
+        "port": 4001
+      },
+      "internal": true,
+      "command": 0,
+      "hex": "03043412c6336414a10f00"
+    },
+    {
+      "name": "ping_with_id",
+      "tid": 1,
+      "to": {
+        "host": "198.51.100.20",
+        "port": 4001
+      },
+      "internal": true,
+      "command": 0,
+      "id": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "hex": "03050100c6336414a10f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f00"
+    },
+    {
+      "name": "ping_with_token",
+      "tid": 48879,
+      "to": {
+        "host": "198.51.100.20",
+        "port": 4001
+      },
+      "internal": false,
+      "command": 0,
+      "token": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "hex": "0302efbec6336414a10f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f00"
+    },
+    {
+      "name": "find_node",
+      "tid": 65535,
+      "to": {
+        "host": "198.51.100.20",
+        "port": 4001
+      },
+      "internal": true,
+      "command": 2,
+      "target": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "hex": "030cffffc6336414a10f02808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+    },
+    {
+      "name": "find_node_not_internal",
+      "tid": 256,
+      "to": {
+        "host": "198.51.100.20",
+        "port": 4001
+      },
+      "internal": false,
+      "command": 2,
+      "target": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "hex": "03080001c6336414a10f02808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+    },
+    {
+      "name": "down_hint_with_value",
+      "tid": 515,
+      "to": {
+        "host": "198.51.100.20",
+        "port": 4001
+      },
+      "internal": true,
+      "command": 3,
+      "value": "a0a1a2",
+      "hex": "03140302c6336414a10f0303a0a1a2"
+    },
+    {
+      "name": "delayed_ping_long_value",
+      "tid": 1029,
+      "to": {
+        "host": "198.51.100.20",
+        "port": 4001
+      },
+      "internal": true,
+      "command": 4,
+      "value": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b",
+      "hex": "03140504c6336414a10f04fd2c01000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfeff000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b"
+    },
+    {
+      "name": "find_node_all_fields",
+      "tid": 22136,
+      "to": {
+        "host": "198.51.100.20",
+        "port": 4001
+      },
+      "internal": true,
+      "command": 2,
+      "id": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "token": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "target": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f",
+      "value": "a0a1a2",
+      "hex": "031f7856c6336414a10f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f02808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f03a0a1a2"
+    }
+  ],
+  "responses": [
+    {
+      "name": "reply_with_id",
+      "tid": 4660,
+      "to": {
+        "host": "192.0.2.10",
+        "port": 49152
+      },
+      "error": 0,
+      "id": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "hex": "13013412c000020a00c0101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f"
+    },
+    {
+      "name": "reply_with_token",
+      "tid": 4661,
+      "to": {
+        "host": "192.0.2.10",
+        "port": 49152
+      },
+      "error": 0,
+      "token": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "hex": "13023512c000020a00c0404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f"
+    },
+    {
+      "name": "find_node_reply",
+      "tid": 8738,
+      "to": {
+        "host": "192.0.2.10",
+        "port": 49152
+      },
+      "error": 0,
+      "token": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "closer_nodes": [
+        {
+          "host": "203.0.113.5",
+          "port": 3000
+        },
+        {
+          "host": "203.0.113.6",
+          "port": 4001
+        }
+      ],
+      "hex": "13062222c000020a00c0404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f02cb007105b80bcb007106a10f"
+    },
+    {
+      "name": "error_unknown_command",
+      "tid": 13107,
+      "to": {
+        "host": "192.0.2.10",
+        "port": 49152
+      },
+      "error": 1,
+      "closer_nodes": [
+        {
+          "host": "203.0.113.5",
+          "port": 3000
+        },
+        {
+          "host": "203.0.113.6",
+          "port": 4001
+        }
+      ],
+      "hex": "130c3333c000020a00c002cb007105b80bcb007106a10f01"
+    },
+    {
+      "name": "error_invalid_token",
+      "tid": 17476,
+      "to": {
+        "host": "192.0.2.10",
+        "port": 49152
+      },
+      "error": 2,
+      "token": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "hex": "130a4444c000020a00c0404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f02"
+    },
+    {
+      "name": "value_reply",
+      "tid": 21845,
+      "to": {
+        "host": "192.0.2.10",
+        "port": 49152
+      },
+      "error": 0,
+      "value": "a0a1a2",
+      "hex": "13105555c000020a00c003a0a1a2"
+    },
+    {
+      "name": "all_fields_reply",
+      "tid": 26214,
+      "to": {
+        "host": "192.0.2.10",
+        "port": 49152
+      },
+      "error": 0,
+      "id": "101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "token": "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+      "closer_nodes": [
+        {
+          "host": "203.0.113.5",
+          "port": 3000
+        },
+        {
+          "host": "203.0.113.6",
+          "port": 4001
+        }
+      ],
+      "value": "a0a1a2",
+      "hex": "13176666c000020a00c0101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f02cb007105b80bcb007106a10f03a0a1a2"
+    }
+  ]
+}

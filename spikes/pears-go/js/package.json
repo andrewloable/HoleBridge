@@ -1,0 +1,24 @@
+{
+  "name": "holebridge-pears-go-spike-js",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Throwaway spike peers for pears-go feasibility (not product code)",
+  "license": "MIT",
+  "scripts": {
+    "dht": "node dht-driver.js",
+    "noise": "node noise-peer.js",
+    "udx": "node udx-pair.js"
+  },
+  "dependencies": {
+    "b4a": "1.9.0",
+    "dht-rpc": "6.27.0",
+    "hyperdht": "6.34.1",
+    "noise-curve-ed": "2.1.0",
+    "noise-handshake": "4.2.0",
+    "sodium-universal": "5.0.1",
+    "udx-native": "1.21.3"
+  },
+  "devDependencies": {
+    "bare": "1.34.1"
+  }
+}

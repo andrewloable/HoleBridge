@@ -1,0 +1,34 @@
+{
+  "description": "Noise IK on the Ed25519 curve as hyperdht runs it: fixed static and ephemeral keys, the hyperdht prologue, raw payloads, both handshake messages and the transport keys each side derives",
+  "reference": "noise-handshake 4.2.0 with noise-curve-ed 2.1.0",
+  "prologue": "14d6d4b49214ab1033ed204976caa258bae9e1e8543b9ad1fd996a910b0c4e3a",
+  "hash": "7296a6e7042e25f3c3bc638bf9bcbbb91e331a3bd5e6fa6ee6554c8debde565d634310049922fb10a697e67f30a74548ba0efb00b52bb81fb8d8e01cde87dadb",
+  "initiator": {
+    "static": {
+      "public": "700586ef4c7a1fe91aab164ee6acf4901be37220afcf8617f7d094ba81183509",
+      "secret": "7e3da43327333f055551850a59f393d49c3b0b65c455f8a02679d303508ec8f9700586ef4c7a1fe91aab164ee6acf4901be37220afcf8617f7d094ba81183509"
+    },
+    "ephemeral": {
+      "public": "574bcb0a5400a363b0dfdaea837b1644003d3b19daa88c12eaa0ccf3a873c608",
+      "secret": "5ad781dcdff3b5325b41d19d23b009af3d4c51b282d9512109d000db46445afe574bcb0a5400a363b0dfdaea837b1644003d3b19daa88c12eaa0ccf3a873c608"
+    },
+    "payload": "6e6f69736520766563746f7220696e69746961746f72207061796c6f6164",
+    "tx": "f7abb73de3f5b104936ddf2f6400448fd197d0666c15292d36efae36b0cbdf3d",
+    "rx": "2ee6a1263414cba8417fa8316cbdf60fcdd8606e282eb7da20d48b3d792e62a0"
+  },
+  "responder": {
+    "static": {
+      "public": "bf86ce70704ede323ddfc592d8bc7bd4534c11f6a215e43e65ffa42a711bfb71",
+      "secret": "3e9698bb67971bf9fcb11975869f11972f17f41f3a0620d6cee977fe6a677941bf86ce70704ede323ddfc592d8bc7bd4534c11f6a215e43e65ffa42a711bfb71"
+    },
+    "ephemeral": {
+      "public": "c61769c08b3ba1afa0eff2c0548dbef33ce0aa2ad8ecf631e21617584ae855a9",
+      "secret": "9a4e6c699c7e574cc060cae44900162a6ab61e12a76cb9d1ee3ca9c4cf0a4671c61769c08b3ba1afa0eff2c0548dbef33ce0aa2ad8ecf631e21617584ae855a9"
+    },
+    "payload": "6e6f69736520766563746f7220726573706f6e646572207061796c6f6164",
+    "tx": "2ee6a1263414cba8417fa8316cbdf60fcdd8606e282eb7da20d48b3d792e62a0",
+    "rx": "f7abb73de3f5b104936ddf2f6400448fd197d0666c15292d36efae36b0cbdf3d"
+  },
+  "message1": "574bcb0a5400a363b0dfdaea837b1644003d3b19daa88c12eaa0ccf3a873c6083de21bbd3c188271c4e1f362bd1643612d9771b3cd0385f91274208dada8e46e14962317f7fcf5d9e40edc5d75937b10b1f98656805e2fd62243bc9f49ae8510170d7373878a3f19e6a49e6cd777db7733171225aa00f33cb8f81c6ca93b",
+  "message2": "c61769c08b3ba1afa0eff2c0548dbef33ce0aa2ad8ecf631e21617584ae855a945a184d1296826567df649fb748795da23fff18c88706f58f1edd92b61f73077d7da0e2a0e989e4c9ac99e5122a8"
+}

@@ -1,0 +1,153 @@
+{
+  "frames": [
+    {
+      "name": "open_holebridge",
+      "hex": "0001010a686f6c656272696467650068656c6c6f"
+    },
+    {
+      "name": "message_0",
+      "hex": "01007a65726f"
+    },
+    {
+      "name": "message_3",
+      "hex": "01037468726565"
+    },
+    {
+      "name": "open_echo",
+      "hex": "000102046563686f026231"
+    },
+    {
+      "name": "batch",
+      "hex": "0000010b0062617463682d7a65726f0c0362617463682d746872656500020700622d7a65726f"
+    },
+    {
+      "name": "close_holebridge",
+      "hex": "000301"
+    }
+  ],
+  "events": [
+    {
+      "protocol": "holebridge",
+      "id": "",
+      "event": "open",
+      "handshake": "68656c6c6f"
+    },
+    {
+      "protocol": "holebridge",
+      "id": "",
+      "event": "message",
+      "index": 0,
+      "payload": "7a65726f"
+    },
+    {
+      "protocol": "holebridge",
+      "id": "",
+      "event": "message",
+      "index": 3,
+      "payload": "7468726565"
+    },
+    {
+      "protocol": "echo",
+      "id": "6231",
+      "event": "open",
+      "handshake": ""
+    },
+    {
+      "protocol": "holebridge",
+      "id": "",
+      "event": "message",
+      "index": 0,
+      "payload": "62617463682d7a65726f"
+    },
+    {
+      "protocol": "holebridge",
+      "id": "",
+      "event": "message",
+      "index": 3,
+      "payload": "62617463682d7468726565"
+    },
+    {
+      "protocol": "echo",
+      "id": "6231",
+      "event": "message",
+      "index": 0,
+      "payload": "622d7a65726f"
+    },
+    {
+      "protocol": "holebridge",
+      "id": "",
+      "event": "close",
+      "is_remote": true
+    }
+  ],
+  "unknown_index": {
+    "frames": [
+      {
+        "name": "open_holebridge",
+        "hex": "0001010a686f6c656272696467650068656c6c6f"
+      },
+      {
+        "name": "message_5",
+        "hex": "01057374726179"
+      },
+      {
+        "name": "message_0",
+        "hex": "01006b657074"
+      }
+    ],
+    "events": [
+      {
+        "protocol": "holebridge",
+        "id": "",
+        "event": "open",
+        "handshake": "68656c6c6f"
+      },
+      {
+        "protocol": "holebridge",
+        "id": "",
+        "event": "message",
+        "index": 0,
+        "payload": "6b657074"
+      }
+    ]
+  },
+  "reply_batch": {
+    "input": [
+      {
+        "name": "reply_open",
+        "hex": "000101046563686f00"
+      },
+      {
+        "name": "reply_batch",
+        "hex": "00000104006f6e65040074776f0400736978"
+      }
+    ],
+    "replies": [
+      {
+        "name": "",
+        "hex": "000101046563686f00"
+      },
+      {
+        "name": "",
+        "hex": "00000104016f6e65040174776f0401736978"
+      }
+    ]
+  },
+  "split_batch": [
+    {
+      "name": "split_open",
+      "length": 9,
+      "sha256": "2e5a4d089358d8c198ca28340be4555122baa715c3f17b38ddaa9854bacfb1c5"
+    },
+    {
+      "name": "split_batch",
+      "length": 8388659,
+      "sha256": "10ba9ea86ff54ca6093c74f835764a3e8a719e7e4fd336654b8182bebe0c6a89"
+    },
+    {
+      "name": "split_batch",
+      "length": 1048585,
+      "sha256": "b134ac769315e7f64fcbf88e66672e76487a1b21146e352cf16cad5bded34cd6"
+    }
+  ]
+}

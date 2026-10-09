@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Legacy backup rules (Android 11 and older). Same excludes as data_extraction_rules.xml, so the
+  secure storage prefs (their Keystore key is never backed up) and the pear store stay out if backup
+  is ever turned on again; with allowBackup false today, nothing is backed up.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
+    <exclude domain="sharedpref" path="FlutterSecureKeyStorage.xml"/>
+    <exclude domain="sharedpref" path="FlutterSecureStorageConfiguration.xml"/>
+    <exclude domain="file" path="pear-corestore"/>
+    <exclude domain="file" path="pear-bulk"/>
+</full-backup-content>

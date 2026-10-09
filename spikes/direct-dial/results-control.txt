@@ -1,0 +1,43 @@
+host public key prefix: f6147c57
+right client public key prefix: 9bea2492
+wrong client public key prefix: 0f74d23e
+testnet: 10 nodes on loopback, started in 14 ms
+host server listening on the host key pair, listen took 2 ms
+--- right client, 20 connects ---
+right client exit code: 0 signal: null killed: false wall ms: 1060
+client bootstrap ms: 4
+connect 1: ok=true connectMs=9 echoMs=34 echoBytes=1048576 echoOk=true
+connect 2: ok=true connectMs=3 echoMs=52 echoBytes=1048576 echoOk=true
+connect 3: ok=true connectMs=3 echoMs=41 echoBytes=1048576 echoOk=true
+connect 4: ok=true connectMs=2 echoMs=42 echoBytes=1048576 echoOk=true
+connect 5: ok=true connectMs=3 echoMs=39 echoBytes=1048576 echoOk=true
+connect 6: ok=true connectMs=3 echoMs=39 echoBytes=1048576 echoOk=true
+connect 7: ok=true connectMs=2 echoMs=43 echoBytes=1048576 echoOk=true
+connect 8: ok=true connectMs=4 echoMs=42 echoBytes=1048576 echoOk=true
+connect 9: ok=true connectMs=2 echoMs=40 echoBytes=1048576 echoOk=true
+connect 10: ok=true connectMs=3 echoMs=41 echoBytes=1048576 echoOk=true
+connect 11: ok=true connectMs=2 echoMs=41 echoBytes=1048576 echoOk=true
+connect 12: ok=true connectMs=1 echoMs=41 echoBytes=1048576 echoOk=true
+connect 13: ok=true connectMs=2 echoMs=41 echoBytes=1048576 echoOk=true
+connect 14: ok=true connectMs=2 echoMs=39 echoBytes=1048576 echoOk=true
+connect 15: ok=true connectMs=2 echoMs=43 echoBytes=1048576 echoOk=true
+connect 16: ok=true connectMs=2 echoMs=42 echoBytes=1048576 echoOk=true
+connect 17: ok=true connectMs=1 echoMs=42 echoBytes=1048576 echoOk=true
+connect 18: ok=true connectMs=1 echoMs=43 echoBytes=1048576 echoOk=true
+connect 19: ok=true connectMs=2 echoMs=40 echoBytes=1048576 echoOk=true
+connect 20: ok=true connectMs=2 echoMs=47 echoBytes=1048576 echoOk=true
+right client connected 20 of 20
+connect ms over 20 ok connects: min=1 p50=2 p95=4 max=9 mean=2.6
+1 MB echo ms: min=34 p50=41 p95=47 max=52 mean=41.6
+server after right run: connections=20 admitted handshakes=20 rejected handshakes=0 echoed bytes=20971520
+--- wrong client, 3 attempts, 20000 ms window each ---
+wrong client exit code: 0 signal: null killed: false wall ms: 187
+wrong attempt 1: connected=true ms=6 reason=undefined
+wrong attempt 2: connected=true ms=2 reason=undefined
+wrong attempt 3: connected=true ms=2 reason=undefined
+wrong client connected 3 of 3
+server during wrong run: connections=3 admitted=0 rejected=3
+CONTROL RUN: firewall admitted all keys; wrong client connected 3 of 3 (expected all, so the firewall is the only gate)
+PASS RULE: FAIL (right 20/20, wrong connected 3/3)
+SUMMARY_JSON {"rightOk":20,"rightTotal":20,"wrongConnected":3,"wrongTotal":3,"connectSummary":{"n":20,"min":1,"p50":2,"p95":4,"max":9,"mean":2.6},"echoSummary":{"n":20,"min":34,"p50":41,"p95":47,"max":52,"mean":41.6},"pass":false}
+teardown done

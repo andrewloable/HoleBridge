@@ -1,0 +1,196 @@
+{
+  "description": "PROVISIONAL, not frozen: do not commit this file until the owner runs HoleBridge-3vg or accepts the proposed Argon2id cost (docs/security.md, Derivation); committing freezes the derivation. Derivation v1 from docs/security.md: salt = BLAKE2b-128(label salt || appKey); root = Argon2id13(normalized key, salt, OPS, MEM) with OPS 3 and MEM 67108864 bytes (64 MiB); seed(role) = BLAKE2b-256(label role || root), keyed with appKey; public key = Ed25519 seed key pair. lanProbeKey is the lan seed itself, the key that MACs LAN probes and replies (docs/architecture.md, LAN probe). Host keys use the holebridge key v1 labels and the roles host, client and lan; relay keys use the holebridge relay v1 labels and the roles server and member. Every byte value is lowercase hex. normalized is the ASCII of the 9-symbol key, which is 7KQM4X9TR, HJKMNPQRS or 0123ABCDE. Application keys: bytes 0x00 to 0x1f, and 0xff repeated 32 times. Test values only. Written by spec/gen/derive.js.",
+  "reference": "sodium-universal 5.0.1: crypto_generichash, crypto_pwhash (ALG_ARGON2ID13), crypto_sign_seed_keypair",
+  "OPS": 3,
+  "MEM": 67108864,
+  "keys": [
+    {
+      "appKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "normalized": "374b514d3458395452",
+      "salt": "01c95b14e6ea4a8b4b4ac8a2c8d0a3bf",
+      "root": "e74e362cae97f73ff0b5ceda0e9c484cda68e77ee4c540ebbc42ad06b06cb303",
+      "seeds": {
+        "host": "cd14727fd59522707a6131182f7c38e6648a7413d4e2d11921a2eaab094b2714",
+        "client": "f6d09043cd4f1eb966134a7679f53fc1455ee21e49ea9f8f46ae4fa4f1ee6e56",
+        "lan": "67936e96ed2fe13739016c06da2156e6b492c1709d1f428710be4c417938b46b"
+      },
+      "publicKeys": {
+        "host": "a45f0b91e217d47322c729b3bc8ce00c30a4f49eb8ef50b90df21de0b133926a",
+        "client": "dc0f391377cd2d6fdaf70dd8e555eb949c14f10f4b841a80c838805fddfd6e07",
+        "lan": "c438aa4cd91dbff663506b1d547e31808f03c9e9512209efedc1da2190630572"
+      },
+      "lanProbeKey": "67936e96ed2fe13739016c06da2156e6b492c1709d1f428710be4c417938b46b"
+    },
+    {
+      "appKey": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "normalized": "374b514d3458395452",
+      "salt": "bddbb1002cc15ddd35096c180c113516",
+      "root": "49132c5622742de5c2ec14faec3c1e8cba15fbc481f00ec2a9c531ec0e98fadb",
+      "seeds": {
+        "host": "af489e78d0c033d04071353b58bae520cb01700fcd2a2bd1c6f283f4a1708e3b",
+        "client": "14663eed08afe2745f3b08525d5aa8d87770e2a2f79443606014650e7f10d307",
+        "lan": "983e224eff47bce2874c08f2581e2523bca525936072372094bce9a56fb4b46e"
+      },
+      "publicKeys": {
+        "host": "52edf53553fa0ac7316fe858e1189fabd7f935f0e3d95406de5994efbbcef25e",
+        "client": "805f913bc218f16a214aaa427dd121c98e960f457b786b2806f4182c74f9fe9b",
+        "lan": "4a23bc232ce65844440b74aa8fcb8e1350b80f50de4c3cbfd1fae7ba59c6e3f6"
+      },
+      "lanProbeKey": "983e224eff47bce2874c08f2581e2523bca525936072372094bce9a56fb4b46e"
+    },
+    {
+      "appKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "normalized": "484a4b4d4e50515253",
+      "salt": "01c95b14e6ea4a8b4b4ac8a2c8d0a3bf",
+      "root": "f2f538d0e65a2439bddb246986afdb8782c78b165d6fbe8c81563757330c5634",
+      "seeds": {
+        "host": "8fde643b570f443e8754e99bc793482b5141822818c485a4e233a46b84db4d51",
+        "client": "1d3470386693054b90cb9b89120d87716f21893544546e28ca80c92548d797d5",
+        "lan": "54db445d215bc3f6c78a9ffe8b4479347ed270c82bb2a6b57eace9407e993ca0"
+      },
+      "publicKeys": {
+        "host": "1c5290756b6de62f68477a2230e0484c093dd8e055226a7e395fa952caec4136",
+        "client": "d9d21906fbcc2194b68243ec8b391ca2d568d5e6667cf2fdb0b4bafb77dfd3b0",
+        "lan": "c8d862ba1826312d6b8175e4bbef172d939ba27ed64e25feefd2a0a5a65d4deb"
+      },
+      "lanProbeKey": "54db445d215bc3f6c78a9ffe8b4479347ed270c82bb2a6b57eace9407e993ca0"
+    },
+    {
+      "appKey": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "normalized": "484a4b4d4e50515253",
+      "salt": "bddbb1002cc15ddd35096c180c113516",
+      "root": "52e77a2abd83b88af189350096f762ee01b8f3558975adc66dacd22fcfeadb7e",
+      "seeds": {
+        "host": "004450b3e0e191bd859ef0226cb12cb110bb382c3fdd083f59bb8bf59ff0bbde",
+        "client": "87afe6dab8dfe648e3465ba88e61a5bca83dc69a4e07e930efb1eaf9899a5256",
+        "lan": "c70c407b074f04e7e85eb2dac04b2d1689ff14b408a6d559ee66b5c45e89c7fd"
+      },
+      "publicKeys": {
+        "host": "63e0daa2462cf9df994e8eeed1a5d7f2c35aa7c001a2b538823bc3318232f8f6",
+        "client": "6afe529ae1bfb06343effdaff40c3ac1371a30cc0995004c4535db7dd2dabcce",
+        "lan": "aaa8bc59f4516f2ccfa74978a620895fc34028366ff0b205a395349dcd06cf73"
+      },
+      "lanProbeKey": "c70c407b074f04e7e85eb2dac04b2d1689ff14b408a6d559ee66b5c45e89c7fd"
+    },
+    {
+      "appKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "normalized": "303132334142434445",
+      "salt": "01c95b14e6ea4a8b4b4ac8a2c8d0a3bf",
+      "root": "3f55c231d745251c8576ee13b9f1e38752bc761b96632e008680371cdd75f1a6",
+      "seeds": {
+        "host": "4cd0ba62eb20ea28a0a7a55dd78bcc396dda7b1b11fa3cb2b8e15263530e1495",
+        "client": "8f87a58b3dfaa09ec0bb4cf589566bd94f5d14320851fbd067b84e42f33a2505",
+        "lan": "71ea7c6f529ef082d67e04e1669e28b1f2f713c8bec98e17a638a5fc3f75d686"
+      },
+      "publicKeys": {
+        "host": "4b269a73c247bd85acaf066b32928b71fc687324cc4f355890bec1b3389fa678",
+        "client": "d757fee0f23fda8dea6f03110c846eb44234c4820c3d98a399ef5c56bf4f6579",
+        "lan": "7a95f17cb3eb6383b42da7191faa20fdf157f84aa8136001096189a29c813576"
+      },
+      "lanProbeKey": "71ea7c6f529ef082d67e04e1669e28b1f2f713c8bec98e17a638a5fc3f75d686"
+    },
+    {
+      "appKey": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "normalized": "303132334142434445",
+      "salt": "bddbb1002cc15ddd35096c180c113516",
+      "root": "98190b3393725811199e37e8c18a5d206738b1808f21e590b6559c35f67a3436",
+      "seeds": {
+        "host": "a022687b74a900c196557ef2c389fcc72dd42993b766d2b013d4273eb09f2f72",
+        "client": "2742f5f7b8899536da19c555a702023a6afa62b510cc3a530d5f78b73a82cb69",
+        "lan": "e694449297c152e205a57bac50da5e62d0ac2929369333f26afb6885e5e8b39e"
+      },
+      "publicKeys": {
+        "host": "a5c58ec360d00db25084e759ace202d3862d865f1f4844fd3e2bc389e0922857",
+        "client": "0e8e53d93777d672a4dab48268182eee17a6ba6fc85c0f0743b575b64f943efc",
+        "lan": "917cf74406c14c55adfa050a0e4a95b096deb37fdf349a9ccc5e492ebffdb119"
+      },
+      "lanProbeKey": "e694449297c152e205a57bac50da5e62d0ac2929369333f26afb6885e5e8b39e"
+    }
+  ],
+  "relayKeys": [
+    {
+      "appKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "normalized": "374b514d3458395452",
+      "salt": "22024cc45df5131e0e010df1a9d5ee49",
+      "root": "6af0d92e0c2ee0ed1237f189e76eccd04f4fd48d712d14de5a807f17c9e42e22",
+      "seeds": {
+        "server": "393fb37dbaa332689bac80aa40e289ede14d663c145d465beebbe35875538f60",
+        "member": "bc4761eee9ff1eaabb483cf660c4caec5b571f25b1005c28866b20420e79c94f"
+      },
+      "publicKeys": {
+        "server": "85c5ef8ee443ed5fa274a8b7b1eb723093538ebefc7f4c0907579732e3af0e6a",
+        "member": "28851646eae1dd3a42b7ce0e65b9c0100c9dd03e503f19cf35223d285c98198a"
+      }
+    },
+    {
+      "appKey": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "normalized": "374b514d3458395452",
+      "salt": "5e6f1ced64e4edb672600a67db8146be",
+      "root": "39ef83998754126dd3294f6d2ad59ab6c7c0d5d9bd5a34de6e52900d308b43b2",
+      "seeds": {
+        "server": "1f3433f0c188a68f6661eaf53f873d67278bdf3a3bc8b4c53c34be0aa5ce7ffd",
+        "member": "6db30287fb7157c5b080b6638571bd50898bd5739a949520c540fdc2bbb02bab"
+      },
+      "publicKeys": {
+        "server": "9a2b8efb5abdbea5faa16dc70493f20737c9a1644adcbcbd5be420d0b30668e2",
+        "member": "5e145b6347cb4592eb7cd8c8e45a1537e21010527dd46780df3e19e123be726d"
+      }
+    },
+    {
+      "appKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "normalized": "484a4b4d4e50515253",
+      "salt": "22024cc45df5131e0e010df1a9d5ee49",
+      "root": "1c82ac1009f1183261af2100ab6e54f612e030a02cdd6da1313533b4d1d975b5",
+      "seeds": {
+        "server": "9bfd9a7e2ea18e2f1188e0aa3ada8076d114de06bd8d8a10f4b38eb7ebc9138c",
+        "member": "b80cc5580719b28b7ea843e164b2d8e42079ff3d7cf313d311b80a8a3d505e55"
+      },
+      "publicKeys": {
+        "server": "f2cbd844fb32f93b42dc875c8b5a3e7550a33636f326a1f698052c2217fac1ef",
+        "member": "44182f512559ce71ec3804b6340f15af0004aa629c6020d5aade8cc6ba185372"
+      }
+    },
+    {
+      "appKey": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "normalized": "484a4b4d4e50515253",
+      "salt": "5e6f1ced64e4edb672600a67db8146be",
+      "root": "67073a9631b1a6f4d6e405e69bd68b34584f8439fbca91b310686beda11d9018",
+      "seeds": {
+        "server": "eb3aa13974770fbd4f11c81a6eb5cc87e339ef5555617e0d174c915cbee768c6",
+        "member": "bdcaf53e403f5810fdaf08748f5428f6e643f90fea1f80995f25ef3df59c88ca"
+      },
+      "publicKeys": {
+        "server": "3d6079deb88ddbcc7114a1513675a37798a39dfb88e1751fbe88d155f7d0a791",
+        "member": "9ae752cf5ccec608d86e5d05b6204e29907c809d1845981530ff5eae4598d96c"
+      }
+    },
+    {
+      "appKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "normalized": "303132334142434445",
+      "salt": "22024cc45df5131e0e010df1a9d5ee49",
+      "root": "4d82af782eab8a3bc463144848b4fdd6b41d8826978961b363dd4c05c55e595b",
+      "seeds": {
+        "server": "596012bf57268aa2dbb3d3fa9c1f928c5ec7de92049a13a39f8efc1fe02267d9",
+        "member": "e3eb7c5ecaaed401aad8b9c29a0258e40045bd70c5ca531df693951782b35a0e"
+      },
+      "publicKeys": {
+        "server": "143cf64f023986faba2b9025fabf5aefeac6313af4959f5a5d75c7e452fc30ef",
+        "member": "9ba58d2ad2a0a6b97445a83152792bac41aedd43a8621214e909ec0ff27506c7"
+      }
+    },
+    {
+      "appKey": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "normalized": "303132334142434445",
+      "salt": "5e6f1ced64e4edb672600a67db8146be",
+      "root": "9d41b13e1c20d91f58cbf9aaa5b543a219be0dda7a20e6648e2245be18ab17bd",
+      "seeds": {
+        "server": "9a4c0180b16cc942b7edf643a19c2af00ecc0b4ec24d23ac3d01bab58d439b3f",
+        "member": "4fc1405a2ae347423b3c4ba431b0965f4fbbe27567acaac1ef7ebd50f98f4a1d"
+      },
+      "publicKeys": {
+        "server": "ca92bf9604a986fd0006646642a68d2e5f48470ad0a418bc1de7a1c614cabdab",
+        "member": "c382ea76298b2d5722098aea06e853e92d3eeda9e203b84d83c764a9663e736e"
+      }
+    }
+  ]
+}

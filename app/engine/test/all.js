@@ -1,0 +1,18 @@
+// Runs every *.test.js in one Bare process. Add each new test file here: the list is explicit
+// because listing the directory would need bare-fs, which is not a declared dependency.
+require('./smoke.test.js')
+require('./vectors.test.js')
+require('./log.test.js')
+require('./protocol.test.js')
+require('./keys-normalize.test.js')
+require('./keys-derive.test.js')
+require('./ipc.test.js')
+require('./mux-flow.test.js')
+require('./mux-close.test.js')
+require('./fake-host.test.js')
+require('./listeners.test.js')
+require('./connect.test.js')
+require('./relay.test.js')
+require('./handoff.test.js')
+require('./lan-probe.test.js')
+require('./vpn-dns.test.js')

@@ -31,3 +31,6 @@ Thumbs.db
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# App engine bundle output (npm run bundle)
+app/engine/dist/

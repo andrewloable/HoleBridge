@@ -1,0 +1,156 @@
+{
+  "codes": [
+    {
+      "code": "HB-APPKEY-INVALID",
+      "title": "Application key is not valid",
+      "problem": "the application key is not valid",
+      "cause": "An application key is 64 lowercase hex digits. A copied key may be cut short or use capital letters.",
+      "fix": "Scan the host's QR code again, or copy the application key again from holebridge app-key on the host.",
+      "where": ["go", "engine"]
+    },
+    {
+      "code": "HB-APPKEY-MISSING",
+      "title": "No application key",
+      "problem": "there is no application key for this deployment",
+      "cause": "Each deployment has one application key. It is made at install or first run, and an app gets it from a host's QR code or link.",
+      "fix": "On the host, run holebridge app-key --new to create one. In the app, scan the host's QR code or open its link.",
+      "where": ["go", "app"]
+    },
+    {
+      "code": "HB-APPKEY-PERMS",
+      "title": "app.key readable by others",
+      "problem": "app.key can be read by other users",
+      "cause": "The file holds the application key, a secret for the whole deployment. The host and the relay will not start while others can read it.",
+      "fix": "chmod 600 ~/.config/holebridge/app.key",
+      "where": ["go"]
+    },
+    {
+      "code": "HB-CONFIG-INVALID",
+      "title": "Config is not valid",
+      "problem": "the configuration is not valid",
+      "cause": "A value in host.json is missing or wrong, or no config directory is set. The detail names what is wrong.",
+      "fix": "Fix the value the detail names, in host.json, or set --config or HOLEBRIDGE_CONFIG.",
+      "where": ["go"]
+    },
+    {
+      "code": "HB-CONFIG-PERMS",
+      "title": "host.json readable by others",
+      "problem": "host.json can be read by other users",
+      "cause": "The file holds the host key.",
+      "fix": "chmod 600 ~/.config/holebridge/host.json",
+      "where": ["go"]
+    },
+    {
+      "code": "HB-HANDOFF-EXPIRED",
+      "title": "Pairing code expired",
+      "problem": "the pairing code timed out",
+      "cause": "A pairing code works for 5 minutes, so an old code is not accepted.",
+      "fix": "On the TV, choose Add from phone again to show a new code.",
+      "where": ["app"]
+    },
+    {
+      "code": "HB-HANDOFF-UNREACHABLE",
+      "title": "Phone cannot reach the TV",
+      "problem": "the phone cannot reach the TV",
+      "cause": "The phone and the TV are not on the same network, or the network keeps devices apart. Guest networks often do.",
+      "fix": "Use the same network, not a guest network with client isolation.",
+      "where": ["app"]
+    },
+    {
+      "code": "HB-IPC-DESYNC",
+      "title": "Engine output out of step",
+      "problem": "a malformed frame arrived on the worklet's stdout",
+      "cause": "Native code can still write to fd 1 directly.",
+      "fix": "The app restarts its engine on its own. If this keeps happening, report it with this code.",
+      "where": ["app"]
+    },
+    {
+      "code": "HB-KEY-INVALID",
+      "title": "Key is not valid",
+      "problem": "the key is not valid",
+      "cause": "A key is 9 symbols from 0 to 9 and A to Z, except U. Case, dashes and spaces do not matter.",
+      "fix": "Type the key shown by holebridge key on the host, or scan its QR code.",
+      "where": ["go", "engine", "app"]
+    },
+    {
+      "code": "HB-LAN-PORT-IN-USE",
+      "title": "LAN port already in use",
+      "problem": "a LAN port is already taken",
+      "cause": "Another program, or a second host on this machine, is using the port.",
+      "fix": "Stop the other program, or set other lan.port and lan.discoveryPort values in host.json.",
+      "where": ["go"]
+    },
+    {
+      "code": "HB-LIMIT-REACHED",
+      "title": "Connection limit reached",
+      "problem": "the host is at one of its limits",
+      "cause": "Too many connections or streams are open at once. The host caps them so that no one client can use up its resources.",
+      "fix": "Close some connections and try again. The host owner can raise a limit under limits in host.json.",
+      "where": ["go", "app"]
+    },
+    {
+      "code": "HB-LOOKUP-TIMEOUT",
+      "title": "Host not found",
+      "problem": "the app could not reach the host",
+      "cause": "No host answered for this key. The host may be off, the key may be mistyped or from another deployment, or the network may block the connection.",
+      "fix": "Check that the host is running and that the key is right. The app keeps trying on its own.",
+      "where": ["app"]
+    },
+    {
+      "code": "HB-RELAY-REFUSED",
+      "title": "Relay refused the connection",
+      "problem": "the relay did not accept this key",
+      "cause": "Only one side has the relay key, or the two sides have different relay keys.",
+      "fix": "Put the same relay key in host.json (relay) and in the app under Settings, Relay.",
+      "where": ["go", "app"]
+    },
+    {
+      "code": "HB-TARGET-REFUSED",
+      "title": "Service refused the connection",
+      "problem": "the service refused the connection",
+      "cause": "Nothing is listening at the service's target, or the service turned the connection down.",
+      "fix": "Start the service, or correct its target in host.json.",
+      "where": ["go", "app"]
+    },
+    {
+      "code": "HB-TARGET-TIMEOUT",
+      "title": "Service did not answer in time",
+      "problem": "the service did not answer in time",
+      "cause": "The host could not connect to the service within 10 seconds. The service may be busy or stopped, or its target may be wrong.",
+      "fix": "Check that the service is running and that its target in host.json is right.",
+      "where": ["go", "app"]
+    },
+    {
+      "code": "HB-UDP-TOO-LARGE",
+      "title": "UDP datagram too large",
+      "problem": "a datagram is larger than maxDatagram (1144 bytes by default)",
+      "cause": "A UDP datagram must fit in one encrypted packet. Larger ones are dropped, because HoleBridge does not split them.",
+      "fix": "Make the application send smaller UDP packets.",
+      "where": ["app"]
+    },
+    {
+      "code": "HB-UNKNOWN-SERVICE",
+      "title": "Unknown service",
+      "problem": "the host has no service with this name",
+      "cause": "The name is not in the host's service list, or the app's copy of the list is out of date.",
+      "fix": "Check the name with holebridge service ls on the host, then reconnect the app.",
+      "where": ["go", "app"]
+    },
+    {
+      "code": "HB-USAGE",
+      "title": "Bad command line",
+      "problem": "the command line is not valid",
+      "cause": "A command, option or value is missing or not known.",
+      "fix": "Run holebridge --help to see the commands and options.",
+      "where": ["go"]
+    },
+    {
+      "code": "HB-VERSION-MISMATCH",
+      "title": "App and host versions differ",
+      "problem": "the app and the host speak different protocol versions",
+      "cause": "The app and the host run different protocol versions, which may not work together.",
+      "fix": "Update the app from its store, or re-run the install script on the host.",
+      "where": ["go", "app"]
+    }
+  ]
+}

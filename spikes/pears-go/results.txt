@@ -1,0 +1,73 @@
+
+added 75 packages in 780ms
+== steps 1 and 2: testnet, JS control, Go PING and FIND_NODE
+step1 testnet nodes=3 bootstrap=127.0.0.1:49737
+js vector ping bytes=11 find_node bytes=43
+control js ping ok=true sender id checked=false
+control js findNode closerNodes=2 error=0 sender id checked=false
+encode ping matches js=true bytes=11
+encode find_node matches js=true bytes=43
+peer.id matches js=true
+client socket 127.0.0.1 port=54062 bootstrap=127.0.0.1:49737 peer id prefix=d1dcf835
+warm-up reply: error=0 closer=0 good=true
+replies carrying a sender id: 0 of 21
+ping replies ok=21/21 rtt(ms) min=0.07 p50=0.08 max=0.15
+warm-up reply: error=0 closer=2 good=true
+replies carrying a sender id: 0 of 21
+find_node replies ok=21/21 rtt(ms) min=0.07 p50=0.07 max=0.09
+find_node last closer nodes: [127.0.0.1:49738 127.0.0.1:49739]
+testnet destroyed
+== step 3: Noise IK, Go initiator then Go responder, then the wrong-key negative control
+noise prologue (NS.PEER_HANDSHAKE) prefix=14d6d4b4
+go initiator: payload2 ok=true, responder accepted our check=true, handshake hash equal=true, complete=true
+js responder: handshake complete, initiator check authenticated=true
+noise handshake and transport check go-role=initiator ok=true elapsed=43.30ms js-exit-ok=true
+noise prologue (NS.PEER_HANDSHAKE) prefix=14d6d4b4
+go responder: payload1 ok=true, initiator check authenticated=true, complete=true
+js initiator: handshake complete, transport reply authenticated, responder accepted=true, hash equal=true
+noise handshake and transport check go-role=responder ok=true elapsed=39.97ms js-exit-ok=true
+noise prologue (NS.PEER_HANDSHAKE) prefix=14d6d4b4
+js peer failed: could not verify data
+negative control: handshake failed as expected: EOF js-exit-ok=false
+== step 4: UDX, 100 MiB, three runs each, for the JS runtime node and then bare
+-- runtime node
+go2js run=1 bytes=104857600 digest_match=true go_retransmits=0 go_sack_packets=0 go_packets=91023
+go2js run=1 recv_span_ms=973.2 recv_mbit_s=862.0 send_span_ms=973.4 send_mbit_s=861.8
+go2js run=2 bytes=104857600 digest_match=true go_retransmits=0 go_sack_packets=0 go_packets=91023
+go2js run=2 recv_span_ms=1009.3 recv_mbit_s=831.1 send_span_ms=1009.4 send_mbit_s=831.0
+go2js run=3 bytes=104857600 digest_match=true go_retransmits=0 go_sack_packets=0 go_packets=91023
+go2js run=3 recv_span_ms=1063.0 recv_mbit_s=789.1 send_span_ms=1063.2 send_mbit_s=789.0
+go2js summary recv_mbit_s median=831.1 min=789.1 max=862.0 runs=3
+js2go run=1 bytes=104857600 digest_match=true go_retransmits=0 go_sack_packets=0 go_packets=72402
+js2go run=1 recv_span_ms=534.7 recv_mbit_s=1568.9 send_span_ms=536.2 send_mbit_s=1564.5
+js2go run=2 bytes=104857600 digest_match=true go_retransmits=0 go_sack_packets=0 go_packets=72400
+js2go run=2 recv_span_ms=568.7 recv_mbit_s=1475.1 send_span_ms=569.9 send_mbit_s=1471.9
+js2go run=3 bytes=104857600 digest_match=true go_retransmits=0 go_sack_packets=0 go_packets=72416
+js2go run=3 recv_span_ms=473.4 recv_mbit_s=1771.9 send_span_ms=474.8 send_mbit_s=1766.8
+js2go summary recv_mbit_s median=1568.9 min=1475.1 max=1771.9 runs=3
+js-pair run=1 recv_span_ms=758.2 mbit_s=1106.4 digest_match=true
+js-pair run=2 recv_span_ms=734.4 mbit_s=1142.2 digest_match=true
+js-pair run=3 recv_span_ms=734.5 mbit_s=1142.1 digest_match=true
+js-pair median_mbit_s=1142.1 min=1106.4 max=1142.2
+-- runtime bare
+go2js run=1 bytes=104857600 digest_match=true go_retransmits=0 go_sack_packets=0 go_packets=91023
+go2js run=1 recv_span_ms=1052.5 recv_mbit_s=797.0 send_span_ms=1052.5 send_mbit_s=797.0
+go2js run=2 bytes=104857600 digest_match=true go_retransmits=0 go_sack_packets=0 go_packets=91023
+go2js run=2 recv_span_ms=948.1 recv_mbit_s=884.8 send_span_ms=948.1 send_mbit_s=884.8
+go2js run=3 bytes=104857600 digest_match=true go_retransmits=0 go_sack_packets=0 go_packets=91023
+go2js run=3 recv_span_ms=972.0 recv_mbit_s=863.0 send_span_ms=972.0 send_mbit_s=863.0
+go2js summary recv_mbit_s median=863.0 min=797.0 max=884.8 runs=3
+js2go run=1 bytes=104857600 digest_match=true go_retransmits=0 go_sack_packets=0 go_packets=72416
+js2go run=1 recv_span_ms=476.2 recv_mbit_s=1761.6 send_span_ms=477.2 send_mbit_s=1757.9
+js2go run=2 bytes=104857600 digest_match=true go_retransmits=0 go_sack_packets=0 go_packets=72416
+js2go run=2 recv_span_ms=534.4 recv_mbit_s=1569.7 send_span_ms=535.3 send_mbit_s=1567.1
+js2go run=3 bytes=104857600 digest_match=true go_retransmits=0 go_sack_packets=0 go_packets=72327
+js2go run=3 recv_span_ms=477.2 recv_mbit_s=1758.0 send_span_ms=477.5 send_mbit_s=1756.8
+js2go summary recv_mbit_s median=1758.0 min=1569.7 max=1761.6 runs=3
+js-pair run=1 recv_span_ms=757.9 mbit_s=1106.8 digest_match=true
+js-pair run=2 recv_span_ms=770.9 mbit_s=1088.2 digest_match=true
+js-pair run=3 recv_span_ms=772.1 mbit_s=1086.5 digest_match=true
+js-pair median_mbit_s=1088.2 min=1086.5 max=1106.8
+-- JS to JS in one process, node (not the baseline: both ends share one thread)
+SELF bytes=104857600 digest=c627624712256a783c5008d1c8a9bce5f17b04774abfed4c08d6b8756785e824 want=c627624712256a783c5008d1c8a9bce5f17b04774abfed4c08d6b8756785e824 match=true span_ms=934.2 wall_ms=934.9
+== done

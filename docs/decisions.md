@@ -482,12 +482,32 @@ Turned down:
   the dependency rule (D32);
 - **VPN mode on Android after the MVP,** which builds Keep running only to replace it.
 
+## D38. The default key stays at 9 symbols (45 bits); strong keys and a PIN come in M4 — Decided
+
+Settles Q2. The owner accepted the recommendation on 2026-10-08, before the derivation freezes
+(D28).
+- **Default:** 9 symbols of Crockford Base32, 45 bits, as D3 sets. Its guessing cost is in
+  [security.md](security.md#how-hard-is-a-key-to-guess). That cost applies only to someone who
+  already holds the deployment's application key (D35), and it stays inside that one deployment.
+- **Planned in M4:** optional 18-symbol strong keys (90 bits), for hosts that want no guessing risk,
+  and a PIN per key. Both use the same alphabet and derivation as the default, so M1 freezes the
+  format they need ([security.md](security.md#planned-hardening-options-m4)).
+- **Not decided here:** scoped keys. Q10 still asks whether they join the MVP, before the M2 build.
+
+Why: the 2⁴⁵ cost is paid per deployment, after the application key has already been leaked, and
+a 9-symbol key is what a person can read aloud or type with a TV remote. Lengthening the default
+would cost that usability for every user, while the strong key covers the hosts that need more.
+
+Turned down:
+- an 18-symbol default before the freeze: every key typed on a TV remote would get twice as long,
+  for a risk that exists only after the application key has leaked.
+
 ## Open questions
 
 | # | Question | Recommendation | Settled by |
 |---|---|---|---|
 | Q1 | Argon2id cost: which is the slowest device HoleBridge must run on? | Benchmark on the slowest Android TV box we support; highest cost under ~1 s there | M1, owner names the devices |
-| Q2 | Is a 45-bit key acceptable as the default, given its guessing cost for anyone who has the deployment's application key ([security.md](security.md#how-hard-is-a-key-to-guess))? | Yes, with optional 18-symbol strong keys and a PIN in M4 | Owner, at M1 exit (D28) |
+| Q2 | Is a 45-bit key acceptable as the default, given its guessing cost for anyone who has the deployment's application key ([security.md](security.md#how-hard-is-a-key-to-guess))? | **Settled (D38):** yes, 9 symbols by default; 18-symbol strong keys and a PIN in M4 | Owner, 2026-10-08 |
 | Q3 | Does iOS VPN mode (D37) join the MVP instead of waiting for M5? | It does if the M1 extension spike passes *and* the owner's service list shows a native iPhone app used daily; otherwise M5 | M1 spike + owner |
 | Q4 | Apple TV, and Android TVs older than Android 10 (including Fire OS 7)? | Not planned: no official Flutter tvOS support; flutter_pear_bare needs Android 10+ | Owner |
 | Q5 | A headless client in the Go binary (`holebridge connect`) for servers and scripts? | pears-go already has the transport, but the app role would need a Go implementation too; add when asked | Owner |

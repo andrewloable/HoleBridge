@@ -1,7 +1,8 @@
 # Security
 
-Status: design. The key derivation below is a **proposal until M1 freezes it** with a committed
-test vector. After the first release, changing any part of it invalidates every key in use.
+Status: design. The key derivation below is a **proposal until the owner commits its test vectors**.
+The vectors are written and provisional. After the first release, changing any part of it
+invalidates every key in use.
 
 ## The key
 
@@ -12,20 +13,22 @@ test vector. After the first release, changing any part of it invalidates every 
 - **9 symbols** from Crockford Base32: `0123456789ABCDEFGHJKMNPQRSTVWXYZ` (no `I`, `L`, `O`, `U`).
   Each symbol carries 5 bits, so a key is **45 random bits**.
 - **Forgiving input.** Case-insensitive; dashes and spaces ignored; `O` reads as `0`, `I` and `L`
-  as `1`. `U` is rejected. Displayed in three groups of three, which also suits a TV remote.
+  as `1`. `U` is rejected. The same rule applies to the key part of a key link: the fragment is
+  percent-decoded, then the key is normalized. The application key is not forgiving: it must be
+  64 lowercase hex digits. Displayed in three groups of three, which also suits a TV remote.
 - **No checksum.** All nine symbols are entropy. A mistyped key is simply another key: the app
   reports "no host found for this key" when the lookup gives up.
 - **Generated, never chosen.** The host draws it from a CSPRNG. A key a person picks is a key
   someone else can guess. `holebridge key --set` exists only to move a host to a new machine with
   its existing key.
 
-## Derivation (v1, proposed)
+## Derivation
 
 Every side derives the same values from two inputs: the 9-symbol **key** (the user's half) and the
 **application key** (the deployment's half, below). Derivation happens in each engine: pears-go on
 the host and relay (Go), and the app engine in `app/engine/` (JS). Dart never reimplements it. The
-committed test vector runs in both engines' test suites, so the two implementations cannot drift
-apart.
+test vector runs in both engines' test suites, so the two implementations cannot drift apart. The
+derivation freezes when the owner commits the test vectors.
 
 ```
 appKey     = the deployment's 32-byte application key (see below)
@@ -40,13 +43,17 @@ The 9-symbol key is a seed. Argon2id and BLAKE2b stretch it into full 256-bit Ed
 size a P2P identity needs. Stretching alone adds no randomness. The extra strength comes from the
 application key being a secret only the deployment knows.
 
-- **`OPS` and `MEM`** are proposed as 3 and 64 MiB. M1 benchmarks them on the slowest device we
-  intend to support, most likely an Android TV box, and picks the highest cost that keeps
-  derivation under about one second there. They are written in code as numbers, never as a
-  library's named constants, because a library default can change and the derivation must not.
+- **`OPS` and `MEM`** are 3 and 64 MiB (`MEM` is 67108864 bytes). The owner accepted this proposed
+  cost on 2026-10-08 and chose to build without waiting for the device benchmark (HoleBridge-3vg).
+  That benchmark still checks it on the slowest device we intend to support, most likely an Android
+  TV box: derivation should stay under about one second there, and if it does not, the cost changes
+  before the vectors freeze. They are written in code as numbers, never as a library's named
+  constants, because a library default can change and the derivation must not.
 - **A test vector** (a fixed key, a fixed test application key, and every derived public value) is
-  committed in M1. A test fails if the derivation ever drifts. What freezes is the algorithm, not any
-  deployment's application key.
+  in `spec/vectors/key-derivation.json`. A test fails if the derivation ever drifts. What freezes is
+  the algorithm, not any deployment's application key. The vectors are provisional: the owner commits
+  them once HoleBridge-3vg has run or the proposed cost is accepted, and the derivation freezes at
+  that commit.
 - **Normalization is the one rule implemented three times.** `holebridge key --set` (Go), key entry
   in the app (Dart) and the engine (JS) all normalize input. They share `spec/vectors/key.json`:
   inputs, normalized outputs and rejections. Every suite runs it, next to the derivation vector.
@@ -142,9 +149,10 @@ old key stops working when the host restarts (M3: when it reloads). A leaked app
 answered by `holebridge app-key --rotate` and re-provisioning every app. Planned in M4: stronger keys
 for those who want them, a PIN and expiring keys. See below.
 
-**When this is decided.** Key length is part of the frozen derivation, so the owner decides
-decisions Q2 at M1 exit, before the freeze (the extra secret is settled: the application key, D35).
-Before the M2 build, the owner also decides whether scoped keys join the MVP as its minimum
+**When this is decided.** Key length is part of the derivation, which freezes when the owner commits the test vectors. The owner decided it on
+2026-10-08 (Q2, D38): 9 symbols by default, with strong keys and a PIN in M4. The extra secret is
+settled as the application key (D35). Before the M2 build, the owner also decides whether scoped
+keys join the MVP as its minimum
 access-control floor. If 45 bits stays and scoped keys stay in M4, the accepted risk is that every
 key holder reaches every service. The mitigations are rotation, services keeping their own login,
 and the README's advice never to expose an unauthenticated admin page.
@@ -197,7 +205,10 @@ cannot be replayed into another session.
    others, as `ssh` does with private keys.
 4. **The app stores keys and application keys in the platform's secure storage** (Keychain, Android
    Keystore-backed storage, the desktop equivalents), never in plain preferences. On iOS the
-   keychain group is shared only with HoleBridge's own VPN extension.
+   keychain group is shared only with HoleBridge's own VPN extension. On Android, app backup is off
+   and the secure storage preference files are excluded from device-to-device transfer, because their
+   wrapping key never leaves the device: a restored copy could not be read, and the ciphertext would
+   leave the device.
 5. **In the app, keys and application keys reach the worklet over its IPC**, never on a command
    line or in the environment.
 6. **Compare secrets in constant time:** MACs, resume tokens, PINs and the handoff secret.

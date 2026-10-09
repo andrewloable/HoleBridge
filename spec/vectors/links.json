@@ -1,0 +1,156 @@
+{
+  "base": "https://holebridge.app",
+  "keyLinks": [
+    {
+      "key": "7KQM4X9TR",
+      "appKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "link": "https://holebridge.app/k#7KQM4X9TR.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    {
+      "key": "7KQM4X9TR",
+      "appKey": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "link": "https://holebridge.app/k#7KQM4X9TR.ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "key": "HJKMNPQRS",
+      "appKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "link": "https://holebridge.app/k#HJKMNPQRS.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    {
+      "key": "0123ABCDE",
+      "appKey": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "link": "https://holebridge.app/k#0123ABCDE.ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    }
+  ],
+  "parse": [
+    {
+      "link": "https://holebridge.app/k#7kqm4x9tr.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "expectKey": "7KQM4X9TR",
+      "expectAppKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    {
+      "link": "https://holebridge.app/k#7KQ-M4X-9TR.ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expectKey": "7KQM4X9TR",
+      "expectAppKey": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "link": "https://holebridge.app/k#7kq-m4x-9tr.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "expectKey": "7KQM4X9TR",
+      "expectAppKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    {
+      "link": "https://holebridge.app/k#OI2-3ABCDE.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "expectKey": "0123ABCDE",
+      "expectAppKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    {
+      "link": "https://holebridge.app/k#oL2-3abc-de.ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "expectKey": "0123ABCDE",
+      "expectAppKey": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "link": "https://holebridge.app/k#7KQ M4X 9TR.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "expectKey": "7KQM4X9TR",
+      "expectAppKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    {
+      "link": "https://holebridge.app/k#7KQ%20M4X%209TR.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "expectKey": "7KQM4X9TR",
+      "expectAppKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    {
+      "link": "https://holebridge.app/%6B#7KQM4X9TR.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "expectKey": "7KQM4X9TR",
+      "expectAppKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    }
+  ],
+  "handoffLinks": [
+    {
+      "publicKey": "1111111111111111111111111111111111111111111111111111111111111111",
+      "secret": "22222222222222222222222222222222",
+      "port": 9000,
+      "addresses": ["192.0.2.10"],
+      "link": "https://holebridge.app/h#1.1111111111111111111111111111111111111111111111111111111111111111.22222222222222222222222222222222.9000.192.0.2.10"
+    },
+    {
+      "publicKey": "3333333333333333333333333333333333333333333333333333333333333333",
+      "secret": "44444444444444444444444444444444",
+      "port": 9000,
+      "addresses": ["192.0.2.10", "192.0.2.11", "192.0.2.12"],
+      "link": "https://holebridge.app/h#1.3333333333333333333333333333333333333333333333333333333333333333.44444444444444444444444444444444.9000.192.0.2.10,192.0.2.11,192.0.2.12"
+    },
+    {
+      "publicKey": "5555555555555555555555555555555555555555555555555555555555555555",
+      "secret": "66666666666666666666666666666666",
+      "port": 4000,
+      "addresses": ["198.51.100.7", "203.0.113.9"],
+      "link": "https://holebridge.app/h#1.5555555555555555555555555555555555555555555555555555555555555555.66666666666666666666666666666666.4000.198.51.100.7,203.0.113.9"
+    }
+  ],
+  "invalid": [
+    {
+      "link": "https://holebridge.app/key#7KQM4X9TR.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "reason": "wrong path: the key link lives at /k, not /key"
+    },
+    {
+      "link": "https://holebridge.app/k?7KQM4X9TR.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "reason": "missing fragment: the key is in the query, not after #"
+    },
+    {
+      "link": "https://holebridge.app/k#7KQM4X9TR.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1",
+      "reason": "short application key: 63 hex digits, not 64"
+    },
+    {
+      "link": "https://holebridge.app/k#7KQM4X9TR.g00102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "reason": "non-hex: the application key contains g"
+    },
+    {
+      "link": "https://holebridge.app/h#2.1111111111111111111111111111111111111111111111111111111111111111.22222222222222222222222222222222.9000.192.0.2.10",
+      "reason": "bad version: 2, not 1"
+    },
+    {
+      "link": "https://holebridge.app/h#1.1111111111111111111111111111111111111111111111111111111111111111.22222222222222222222222222222222.0.192.0.2.10",
+      "reason": "port 0 is not a port"
+    },
+    {
+      "link": "https://holebridge.app/h#1.1111111111111111111111111111111111111111111111111111111111111111.22222222222222222222222222222222.70000.192.0.2.10",
+      "reason": "port 70000 is above 65535"
+    },
+    {
+      "link": "https://holebridge.app/h#1.1111111111111111111111111111111111111111111111111111111111111111.22222222222222222222222222222222.9000.",
+      "reason": "no addresses: the address list is empty"
+    },
+    {
+      "link": "https://holebridge.app/h#1.1111111111111111111111111111111111111111111111111111111111111111.22222222222222222222222222222222.9000.2001:db8::1",
+      "reason": "IPv6 address: addresses must be IPv4"
+    },
+    {
+      "link": "https://holebridge.app/k#7KQM4X9TR.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f.extra",
+      "reason": "extra field after the application key"
+    },
+    {
+      "link": "https://holebridge.app/k#7KQM4X9TR.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f%0A",
+      "reason": "trailing %0A after the application key: the decoded key has 65 characters, reason length"
+    },
+    {
+      "link": "https://holebridge.app/k#7KQ%G1M4X9TR.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "reason": "malformed escape: %G1 is not a percent escape, so the link is malformed"
+    },
+    {
+      "link": "https://holebridge.app/./k#7KQM4X9TR.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "reason": "dot segment: /./k is not /k as typed"
+    },
+    {
+      "link": "https://holebridge.app/x/../k#7KQM4X9TR.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "reason": "dot segment: /x/../k is not /k as typed"
+    },
+    {
+      "link": "https://holebridge.app/%2e/k#7KQM4X9TR.000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "reason": "dot segment: %2e decodes to a dot, so the path is /./k, not /k"
+    },
+    {
+      "link": "https://holebridge.app/./h#1.1111111111111111111111111111111111111111111111111111111111111111.22222222222222222222222222222222.9000.192.0.2.10",
+      "reason": "dot segment: /./h is not /h as typed"
+    }
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "dependencies": {
+    "@hyperswarm/secret-stream": "6.9.2",
+    "b4a": "1.9.0",
+    "bare-tcp": "2.6.1",
+    "blind-relay": "1.6.1",
+    "hyperdht": "6.34.1",
+    "sodium-universal": "5.0.1",
+    "udx-native": "1.21.3"
+  },
+  "devDependencies": {
+    "bare": "1.34.1"
+  }
+}

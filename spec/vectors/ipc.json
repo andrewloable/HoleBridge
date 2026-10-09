@@ -1,0 +1,503 @@
+{
+  "description": "IPC frames between the Flutter app and the app engine, as spec/ipc.md defines them: one whole frame per vector, with its type, id and body fields",
+  "reference": "compact-encoding 3.5.2",
+  "vectors": [
+    {
+      "name": "reply 1",
+      "type": 0,
+      "id": 1,
+      "value": {
+        "ok": true,
+        "code": "",
+        "detail": "",
+        "route": "",
+        "services": [],
+        "ports": []
+      },
+      "hex": "0001010000000000"
+    },
+    {
+      "name": "reply 2",
+      "type": 0,
+      "id": 2,
+      "value": {
+        "ok": true,
+        "code": "",
+        "detail": "",
+        "route": "direct",
+        "services": [
+          "web",
+          "ssh"
+        ],
+        "ports": [
+          {
+            "service": "web",
+            "port": 8080
+          },
+          {
+            "service": "ssh",
+            "port": 22
+          }
+        ]
+      },
+      "hex": "0002010000066469726563740203776562037373680203776562fd901f0373736816"
+    },
+    {
+      "name": "reply 3",
+      "type": 0,
+      "id": 3,
+      "value": {
+        "ok": false,
+        "code": "HB-LOOKUP-TIMEOUT",
+        "detail": "no answer from the DHT within 60 s",
+        "route": "",
+        "services": [],
+        "ports": []
+      },
+      "hex": "0003001148422d4c4f4f4b55502d54494d454f5554226e6f20616e737765722066726f6d20746865204448542077697468696e2036302073000000"
+    },
+    {
+      "name": "reply 4",
+      "type": 0,
+      "id": 4,
+      "value": {
+        "ok": false,
+        "code": "HB-KEY-INVALID",
+        "detail": "the key has 8 symbols",
+        "route": "",
+        "services": [],
+        "ports": []
+      },
+      "hex": "0004000e48422d4b45592d494e56414c494415746865206b65792068617320382073796d626f6c73000000"
+    },
+    {
+      "name": "connect 1",
+      "type": 1,
+      "id": 1,
+      "value": {
+        "host": "living-room",
+        "key": "7KQM4X9TR",
+        "appKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "lan": {
+          "addresses": [
+            "192.0.2.10"
+          ],
+          "port": 9000
+        },
+        "ports": [
+          {
+            "service": "web",
+            "port": 8080
+          },
+          {
+            "service": "ssh",
+            "port": 22
+          }
+        ],
+        "bind": "127.0.0.1"
+      },
+      "hex": "01010b6c6976696e672d726f6f6d09374b514d3458395452000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f010a3139322e302e322e3130fd28230203776562fd901f0373736816093132372e302e302e31"
+    },
+    {
+      "name": "connect 2",
+      "type": 1,
+      "id": 2,
+      "value": {
+        "host": "office",
+        "key": "HJKMNPQRS",
+        "appKey": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "lan": {
+          "addresses": [],
+          "port": 0
+        },
+        "ports": [],
+        "bind": "0.0.0.0"
+      },
+      "hex": "0102066f666669636509484a4b4d4e50515253ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00000007302e302e302e30"
+    },
+    {
+      "name": "close 1",
+      "type": 2,
+      "id": 1,
+      "value": {
+        "host": "living-room"
+      },
+      "hex": "02010b6c6976696e672d726f6f6d"
+    },
+    {
+      "name": "close 2",
+      "type": 2,
+      "id": 2,
+      "value": {
+        "host": "office"
+      },
+      "hex": "0202066f6666696365"
+    },
+    {
+      "name": "status 1",
+      "type": 3,
+      "id": 1,
+      "value": {
+        "host": "living-room"
+      },
+      "hex": "03010b6c6976696e672d726f6f6d"
+    },
+    {
+      "name": "status 2",
+      "type": 3,
+      "id": 2,
+      "value": {
+        "host": "office"
+      },
+      "hex": "0302066f6666696365"
+    },
+    {
+      "name": "relay 1",
+      "type": 4,
+      "id": 1,
+      "value": {
+        "key": "",
+        "appKey": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "hex": "0401000000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "relay 2",
+      "type": 4,
+      "id": 2,
+      "value": {
+        "key": "R4NW8P2KD",
+        "appKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      },
+      "hex": "04020952344e573850324b44000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    {
+      "name": "handoff.listen 1",
+      "type": 5,
+      "id": 1,
+      "value": {},
+      "hex": "0501"
+    },
+    {
+      "name": "handoff.cancel 1",
+      "type": 6,
+      "id": 1,
+      "value": {},
+      "hex": "0601"
+    },
+    {
+      "name": "handoff.send 1",
+      "type": 7,
+      "id": 1,
+      "value": {
+        "link": "https://holebridge.app/h#1.1111111111111111111111111111111111111111111111111111111111111111.22222222222222222222222222222222.9000.192.0.2.10,192.0.2.11",
+        "name": "living-room",
+        "key": "7KQM4X9TR",
+        "appKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      },
+      "hex": "07019768747470733a2f2f686f6c656272696467652e6170702f6823312e313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131312e32323232323232323232323232323232323232323232323232323232323232322e393030302e3139322e302e322e31302c3139322e302e322e31310b6c6976696e672d726f6f6d09374b514d3458395452000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    {
+      "name": "handoff.send 2",
+      "type": 7,
+      "id": 2,
+      "value": {
+        "link": "https://holebridge.app/h#1.1111111111111111111111111111111111111111111111111111111111111111.22222222222222222222222222222222.9000.192.0.2.10,192.0.2.11",
+        "name": "",
+        "key": "HJKMNPQRS",
+        "appKey": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "hex": "07029768747470733a2f2f686f6c656272696467652e6170702f6823312e313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131312e32323232323232323232323232323232323232323232323232323232323232322e393030302e3139322e302e322e31302c3139322e302e322e31310009484a4b4d4e50515253ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "vpn.start 1",
+      "type": 8,
+      "id": 1,
+      "value": {
+        "services": [
+          {
+            "host": "living-room",
+            "service": "web",
+            "address": "198.18.0.10",
+            "port": 5001
+          },
+          {
+            "host": "living-room",
+            "service": "ssh",
+            "address": "198.18.0.11",
+            "port": 5002
+          }
+        ],
+        "dnsUpstream": [
+          "192.0.2.1"
+        ]
+      },
+      "hex": "0801020b6c6976696e672d726f6f6d037765620b3139382e31382e302e3130fd89130b6c6976696e672d726f6f6d037373680b3139382e31382e302e3131fd8a1301093139322e302e322e31"
+    },
+    {
+      "name": "vpn.start 2",
+      "type": 8,
+      "id": 2,
+      "value": {
+        "services": [],
+        "dnsUpstream": []
+      },
+      "hex": "08020000"
+    },
+    {
+      "name": "vpn.stop 1",
+      "type": 9,
+      "id": 1,
+      "value": {},
+      "hex": "0901"
+    },
+    {
+      "name": "route 1",
+      "type": 100,
+      "id": 0,
+      "value": {
+        "host": "living-room",
+        "route": "lan"
+      },
+      "hex": "64000b6c6976696e672d726f6f6d036c616e"
+    },
+    {
+      "name": "route 2",
+      "type": 100,
+      "id": 0,
+      "value": {
+        "host": "office",
+        "route": "unreachable"
+      },
+      "hex": "6400066f66666963650b756e726561636861626c65"
+    },
+    {
+      "name": "session 1",
+      "type": 101,
+      "id": 0,
+      "value": {
+        "host": "living-room",
+        "up": true
+      },
+      "hex": "65000b6c6976696e672d726f6f6d01"
+    },
+    {
+      "name": "session 2",
+      "type": 101,
+      "id": 0,
+      "value": {
+        "host": "office",
+        "up": false
+      },
+      "hex": "6500066f666669636500"
+    },
+    {
+      "name": "status 1",
+      "type": 102,
+      "id": 0,
+      "value": {
+        "host": "living-room",
+        "route": "direct",
+        "sessions": 1,
+        "streams": 2,
+        "flows": 1,
+        "bytesIn": 123456,
+        "bytesOut": 789,
+        "nat": {
+          "host": "203.0.113.7",
+          "port": 49737,
+          "firewalled": false,
+          "randomized": false
+        }
+      },
+      "hex": "66000b6c6976696e672d726f6f6d06646972656374010201fe40e20100fd15030b3230332e302e3131332e37fd49c20000"
+    },
+    {
+      "name": "status 2",
+      "type": 102,
+      "id": 0,
+      "value": {
+        "host": "office",
+        "route": "looking",
+        "sessions": 0,
+        "streams": 0,
+        "flows": 0,
+        "bytesIn": 0,
+        "bytesOut": 0,
+        "nat": {
+          "host": "",
+          "port": 0,
+          "firewalled": true,
+          "randomized": true
+        }
+      },
+      "hex": "6600066f6666696365076c6f6f6b696e67000000000000000101"
+    },
+    {
+      "name": "vpn 1",
+      "type": 103,
+      "id": 0,
+      "value": {
+        "port": 5353,
+        "addresses": [
+          {
+            "host": "living-room",
+            "service": "web",
+            "address": "198.18.0.10",
+            "name": "web.living-room.internal"
+          }
+        ]
+      },
+      "hex": "6700fde914010b6c6976696e672d726f6f6d037765620b3139382e31382e302e3130187765622e6c6976696e672d726f6f6d2e696e7465726e616c"
+    },
+    {
+      "name": "vpn 2",
+      "type": 103,
+      "id": 0,
+      "value": {
+        "port": 5353,
+        "addresses": []
+      },
+      "hex": "6700fde91400"
+    },
+    {
+      "name": "services 1",
+      "type": 104,
+      "id": 0,
+      "value": {
+        "host": "living-room",
+        "list": [
+          "web",
+          "ssh",
+          "dns"
+        ],
+        "ports": [
+          {
+            "service": "web",
+            "port": 8080
+          },
+          {
+            "service": "ssh",
+            "port": 22
+          },
+          {
+            "service": "dns",
+            "port": 53
+          }
+        ]
+      },
+      "hex": "68000b6c6976696e672d726f6f6d03037765620373736803646e730303776562fd901f037373681603646e7335"
+    },
+    {
+      "name": "services 2",
+      "type": 104,
+      "id": 0,
+      "value": {
+        "host": "office",
+        "list": [],
+        "ports": []
+      },
+      "hex": "6800066f66666963650000"
+    },
+    {
+      "name": "reject 1",
+      "type": 105,
+      "id": 0,
+      "value": {
+        "host": "living-room",
+        "service": "ssh",
+        "code": "HB-TARGET-REFUSED",
+        "reason": "target refused the connection"
+      },
+      "hex": "69000b6c6976696e672d726f6f6d037373681148422d5441524745542d524546555345441d74617267657420726566757365642074686520636f6e6e656374696f6e"
+    },
+    {
+      "name": "reject 2",
+      "type": 105,
+      "id": 0,
+      "value": {
+        "host": "living-room",
+        "service": "web",
+        "code": "HB-TARGET-TIMEOUT",
+        "reason": "target did not answer in time"
+      },
+      "hex": "69000b6c6976696e672d726f6f6d037765621148422d5441524745542d54494d454f55541d74617267657420646964206e6f7420616e7377657220696e2074696d65"
+    },
+    {
+      "name": "error 1",
+      "type": 106,
+      "id": 0,
+      "value": {
+        "code": "HB-LOOKUP-TIMEOUT",
+        "detail": "no answer from the DHT within 60 s"
+      },
+      "hex": "6a001148422d4c4f4f4b55502d54494d454f5554226e6f20616e737765722066726f6d20746865204448542077697468696e2036302073"
+    },
+    {
+      "name": "error 2",
+      "type": 106,
+      "id": 0,
+      "value": {
+        "code": "HB-RELAY-REFUSED",
+        "detail": "the relay did not admit this key"
+      },
+      "hex": "6a001048422d52454c41592d52454655534544207468652072656c617920646964206e6f742061646d69742074686973206b6579"
+    },
+    {
+      "name": "handoff.code 1",
+      "type": 107,
+      "id": 0,
+      "value": {
+        "link": "https://holebridge.app/h#1.1111111111111111111111111111111111111111111111111111111111111111.22222222222222222222222222222222.9000.192.0.2.10,192.0.2.11"
+      },
+      "hex": "6b009768747470733a2f2f686f6c656272696467652e6170702f6823312e313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131313131312e32323232323232323232323232323232323232323232323232323232323232322e393030302e3139322e302e322e31302c3139322e302e322e3131"
+    },
+    {
+      "name": "handoff.received 1",
+      "type": 108,
+      "id": 0,
+      "value": {
+        "name": "living-room",
+        "key": "7KQM4X9TR",
+        "appKey": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      },
+      "hex": "6c000b6c6976696e672d726f6f6d09374b514d3458395452000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    },
+    {
+      "name": "handoff.received 2",
+      "type": 108,
+      "id": 0,
+      "value": {
+        "name": "office",
+        "key": "HJKMNPQRS",
+        "appKey": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+      },
+      "hex": "6c00066f666669636509484a4b4d4e50515253ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "lan 1",
+      "type": 109,
+      "id": 0,
+      "value": {
+        "host": "living-room",
+        "addresses": [
+          "192.0.2.10",
+          "192.0.2.11"
+        ],
+        "port": 9000
+      },
+      "hex": "6d000b6c6976696e672d726f6f6d020a3139322e302e322e31300a3139322e302e322e3131fd2823"
+    },
+    {
+      "name": "lan 2",
+      "type": 109,
+      "id": 0,
+      "value": {
+        "host": "office",
+        "addresses": [],
+        "port": 0
+      },
+      "hex": "6d00066f66666963650000"
+    }
+  ]
+}

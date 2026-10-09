@@ -1,0 +1,6 @@
+{"ev":"setup","transport":"node net socket over loopback TCP","runtime":"node v24.15.0","rawStreamIsUdx":false,"rawStreamHasSend":"undefined","rawStreamHasTrySend":"undefined","secretStreamSendIsFunction":"function","secretStreamTrySendIsFunction":"function"}
+{"ev":"unordered-calls","sent":{"perSide":8,"sizeBytes":100},"returnTypes":{"client.send":["undefined"],"client.trySend":["undefined"],"server.send":["undefined"],"server.trySend":["undefined"]}}
+{"ev":"unordered-window","windowMs":1500,"clientMessages":0,"serverMessages":0,"clientData":0,"serverData":0}
+{"ev":"ordered-control","serverDataBytes":21}
+{"ev":"done"}
+{"ev":"verdict","text":"NO unordered path on plain TCP: message events 0 both ways, ordered control arrived"}

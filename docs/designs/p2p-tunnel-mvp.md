@@ -201,8 +201,8 @@ release contains:
 - Is 5 minutes the right idle timeout? Lazy-connect measurements may move it.
 - Will Play accept the `specialUse` foreground-service declaration for Keep running? (Since D37:
   will Play accept HoleBridge's `VpnService` declaration, decisions Q9.)
-- Still open from `docs/decisions.md`: Q1 (the slowest device); Q2 (the 45-bit key), decided at M1
-  exit (Recommended Approach item 7, decisions D28). Q13 (how a TV store app gets the application
+- Still open from `docs/decisions.md`: Q1 (the slowest device). Q2 (the 45-bit key) is settled by
+  D38 (2026-10-08; Recommended Approach item 7, decisions D28). Q13 (how a TV store app gets the application
   key) is settled by D36: a handoff from a phone over the LAN.
 
 ## Success Criteria

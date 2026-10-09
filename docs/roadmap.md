@@ -66,8 +66,8 @@ rule, and the [design](designs/p2p-tunnel-mvp.md) says what happens if it fails.
 - **UDP:** which routes carry unordered session datagrams (direct, relay; LAN falls back to the
   ordered queue), and the largest datagram that fits a UDX packet after encryption (`maxDatagram`).
 - **Key cost:** Argon2id benchmarked on the slowest device we will support (decisions Q1).
-- **Key decisions:** the owner decides Q2 (the 45-bit key) at M1 exit, and Q10 (scoped keys in
-  the MVP) before the M2 build (D28). Before the iOS spike, the owner checks the Apple developer
+- **Key decisions:** Q2 (the 45-bit key) is settled (D38, 2026-10-08). The owner decides Q10
+  (scoped keys in the MVP) before the M2 build (D28). Before the iOS spike, the owner checks the Apple developer
   enrollment (Q14).
 - **Freeze key format and derivation v1** with a committed test vector, built on a fixed test
   application key (decisions D35).

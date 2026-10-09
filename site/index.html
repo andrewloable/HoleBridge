@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Open HoleBridge</title>
+<style>
+:root { color-scheme: light dark; --bg: #ffffff; --fg: #1d1d1f; --muted: #5f6368; --accent: #0b57d0; --card: #f1f3f6; }
+@media (prefers-color-scheme: dark) { :root { --bg: #111418; --fg: #e8eaed; --muted: #9aa0a6; --accent: #8ab4f8; --card: #1c2128; } }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 36rem; margin: 0 auto; padding: 2rem 1rem; }
+h1 { font-size: 1.5rem; margin: 0 0 1rem; }
+h2 { font-size: 1.1rem; margin: 1.5rem 0 0.5rem; }
+a { color: var(--accent); }
+.stores a { display: block; padding: 0.75rem 1rem; margin: 0.5rem 0; border-radius: 0.5rem; background: var(--card); text-decoration: none; }
+.stores a.suggested { outline: 2px solid var(--accent); }
+.muted { color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+<!-- Placeholders: replace REPLACE_WITH_PLAY_APP_ID and REPLACE_WITH_APP_STORE_ID with the store identifiers before deploying. -->
+<h1>Open HoleBridge</h1>
+<p>This link opens HoleBridge with a host's key filled in, once the app is installed.</p>
+<p><strong>After installing, scan or open this link again.</strong> The stores do not pass the link into a new install, so the app's first screen shows Scan QR and Paste link (on a TV, Add from phone).</p>
+<h2>Get the app</h2>
+<nav class="stores">
+<a data-store="android" href="https://play.google.com/store/apps/details?id=REPLACE_WITH_PLAY_APP_ID">Google Play (Android phones and TVs)</a>
+<a data-store="ios" href="https://apps.apple.com/app/idREPLACE_WITH_APP_STORE_ID">App Store (iPhone and iPad)</a>
+<a data-store="desktop" href="https://github.com/andrewloable/HoleBridge/releases">Desktop downloads (GitHub Releases)</a>
+</nav>
+<p class="muted">This page loads nothing from other sites and never reads or sends the part of the link after the #. The store links work without scripts.</p>
+</main>
+<script>
+(function () {
+  var ua = navigator.userAgent || '';
+  var iPadOS = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
+  var store = /Android/.test(ua) ? 'android' : ((/iPhone|iPod/.test(ua) || iPadOS) ? 'ios' : 'desktop');
+  var link = document.querySelector('a[data-store="' + store + '"]');
+  if (link) link.classList.add('suggested');
+})();
+</script>
+</body>
+</html>

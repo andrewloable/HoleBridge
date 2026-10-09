@@ -1,0 +1,380 @@
+{
+  "description": "hyperdht message encodings from messages.js: the ipv4 peer address, handshake, holepunch, holepunchPayload, noisePayload, peer, peers, lookupRawReply and announce, with values, hex encodings and truncated inputs",
+  "reference": "hyperdht 6.34.1",
+  "cases": [
+    {
+      "name": "address 203.0.113.7:49737",
+      "type": "address",
+      "value": {
+        "host": "203.0.113.7",
+        "port": 49737
+      },
+      "hex": "cb00710749c2"
+    },
+    {
+      "name": "address 255.255.255.255:65535",
+      "type": "address",
+      "value": {
+        "host": "255.255.255.255",
+        "port": 65535
+      },
+      "hex": "ffffffffffff"
+    },
+    {
+      "name": "handshake with noise only",
+      "type": "handshake",
+      "value": {
+        "mode": 0,
+        "noise": "XWRrcnmAh46VnKOqsbi/xs3U2+Lp8Pf+BQwTGiEoLzY="
+      },
+      "hex": "0000205d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c131a21282f36"
+    },
+    {
+      "name": "handshake with peer address",
+      "type": "handshake",
+      "value": {
+        "mode": 1,
+        "noise": "fIOKkZifpq20u8LJ0Nfe5ezz+gEIDxYdJCsyOUBHTlVcY2pxeH+GjZSboqmwt77F",
+        "peerAddress": {
+          "host": "198.51.100.2",
+          "port": 4000
+        }
+      },
+      "hex": "0101307c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5c6336402a00f"
+    },
+    {
+      "name": "handshake with empty noise, peer and relay addresses",
+      "type": "handshake",
+      "value": {
+        "mode": 2,
+        "noise": "",
+        "peerAddress": {
+          "host": "203.0.113.7",
+          "port": 49737
+        },
+        "relayAddress": {
+          "host": "192.0.2.9",
+          "port": 33445
+        }
+      },
+      "hex": "030200cb00710749c2c0000209a582"
+    },
+    {
+      "name": "holepunch with payload",
+      "type": "holepunch",
+      "value": {
+        "mode": 0,
+        "id": 7,
+        "payload": "m6KpsLe+xczT2g=="
+      },
+      "hex": "0000070a9ba2a9b0b7bec5ccd3da"
+    },
+    {
+      "name": "holepunch with peer address and id 300",
+      "type": "holepunch",
+      "value": {
+        "mode": 1,
+        "id": 300,
+        "payload": "usHIz9bd5Ovy+QAHDhUcIyoxOD9GTVRbYmlwd36FjJOaoaivtr3Eyw==",
+        "peerAddress": {
+          "host": "192.0.2.9",
+          "port": 33445
+        }
+      },
+      "hex": "0101fd2c0128bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbc0000209a582"
+    },
+    {
+      "name": "holepunch payload with no optional fields",
+      "type": "holepunchPayload",
+      "value": {
+        "error": 0,
+        "firewall": 1,
+        "round": 0,
+        "connected": false,
+        "punching": false
+      },
+      "hex": "00000100"
+    },
+    {
+      "name": "holepunch payload with addresses and tokens",
+      "type": "holepunchPayload",
+      "value": {
+        "error": 0,
+        "firewall": 2,
+        "round": 3,
+        "connected": true,
+        "punching": true,
+        "addresses": [
+          {
+            "host": "203.0.113.7",
+            "port": 49737
+          },
+          {
+            "host": "198.51.100.2",
+            "port": 4000
+          }
+        ],
+        "remoteAddress": {
+          "host": "192.0.2.9",
+          "port": 33445
+        },
+        "token": "2eDn7vX8AwoRGB8mLTQ7QklQV15lbHN6gYiPlp2kq7I=",
+        "remoteToken": "+P8GDRQbIikwNz5FTFNaYWhvdn2Ei5KZoKeutbzDytE="
+      },
+      "hex": "3f00020302cb00710749c2c6336402a00fc0000209a582d9e0e7eef5fc030a11181f262d343b424950575e656c737a81888f969da4abb2f8ff060d141b222930373e454c535a61686f767d848b9299a0a7aeb5bcc3cad1"
+    },
+    {
+      "name": "holepunch payload with empty addresses",
+      "type": "holepunchPayload",
+      "value": {
+        "error": 5,
+        "firewall": 0,
+        "round": 1,
+        "connected": false,
+        "punching": true,
+        "addresses": [],
+        "token": "Fx4lLDM6QUhPVl1ka3J5gIeOlZyjqrG4v8bN1Nvi6fA="
+      },
+      "hex": "1605000100171e252c333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0"
+    },
+    {
+      "name": "peer with no relay addresses",
+      "type": "peer",
+      "value": {
+        "publicKey": "HyYtNDtCSVBXXmVsc3qBiI+WnaSrsrnAx87V3OPq8fg=",
+        "relayAddresses": []
+      },
+      "hex": "1f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f800"
+    },
+    {
+      "name": "peer with two relay addresses",
+      "type": "peer",
+      "value": {
+        "publicKey": "PkVMU1phaG92fYSLkpmgp661vMPK0djf5u30+wIJEBc=",
+        "relayAddresses": [
+          {
+            "host": "203.0.113.7",
+            "port": 49737
+          },
+          {
+            "host": "198.51.100.2",
+            "port": 4000
+          }
+        ]
+      },
+      "hex": "3e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb0209101702cb00710749c2c6336402a00f"
+    },
+    {
+      "name": "peers empty",
+      "type": "peers",
+      "value": [],
+      "hex": "00"
+    },
+    {
+      "name": "peers with two entries",
+      "type": "peers",
+      "value": [
+        {
+          "publicKey": "HyYtNDtCSVBXXmVsc3qBiI+WnaSrsrnAx87V3OPq8fg=",
+          "relayAddresses": []
+        },
+        {
+          "publicKey": "PkVMU1phaG92fYSLkpmgp661vMPK0djf5u30+wIJEBc=",
+          "relayAddresses": [
+            {
+              "host": "203.0.113.7",
+              "port": 49737
+            },
+            {
+              "host": "198.51.100.2",
+              "port": 4000
+            }
+          ]
+        }
+      ],
+      "hex": "021f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8003e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb0209101702cb00710749c2c6336402a00f"
+    },
+    {
+      "name": "lookup reply with no peers and bump 0",
+      "type": "lookupRawReply",
+      "value": {
+        "peers": [],
+        "bump": 0
+      },
+      "hex": "0000"
+    },
+    {
+      "name": "lookup reply with one peer and bump 0",
+      "type": "lookupRawReply",
+      "value": {
+        "peers": [
+          {
+            "publicKey": "PkVMU1phaG92fYSLkpmgp661vMPK0djf5u30+wIJEBc=",
+            "relayAddresses": [
+              {
+                "host": "203.0.113.7",
+                "port": 49737
+              },
+              {
+                "host": "198.51.100.2",
+                "port": 4000
+              }
+            ]
+          }
+        ],
+        "bump": 0
+      },
+      "hex": "013e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb0209101702cb00710749c2c6336402a00f00"
+    },
+    {
+      "name": "lookup reply with two peers and bump 1000",
+      "type": "lookupRawReply",
+      "value": {
+        "peers": [
+          {
+            "publicKey": "HyYtNDtCSVBXXmVsc3qBiI+WnaSrsrnAx87V3OPq8fg=",
+            "relayAddresses": []
+          },
+          {
+            "publicKey": "PkVMU1phaG92fYSLkpmgp661vMPK0djf5u30+wIJEBc=",
+            "relayAddresses": [
+              {
+                "host": "203.0.113.7",
+                "port": 49737
+              },
+              {
+                "host": "198.51.100.2",
+                "port": 4000
+              }
+            ]
+          }
+        ],
+        "bump": 1000
+      },
+      "hex": "021f262d343b424950575e656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8003e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb0209101702cb00710749c2c6336402a00ffde803"
+    },
+    {
+      "name": "announce with peer, refresh and signature",
+      "type": "announce",
+      "value": {
+        "peer": {
+          "publicKey": "PkVMU1phaG92fYSLkpmgp661vMPK0djf5u30+wIJEBc=",
+          "relayAddresses": [
+            {
+              "host": "203.0.113.7",
+              "port": 49737
+            },
+            {
+              "host": "198.51.100.2",
+              "port": 4000
+            }
+          ]
+        },
+        "refresh": "Nj1ES1JZYGdudXyDipGYn6attLvCydDX3uXs8/oBCA8=",
+        "signature": "VVxjanF4f4aNlJuiqbC3vsXM09rh6O/2/QQLEhkgJy41PENKUVhfZm10e4KJkJeepayzusHIz9bd5Ovy+QAHDg==",
+        "bump": 2
+      },
+      "hex": "0f3e454c535a61686f767d848b9299a0a7aeb5bcc3cad1d8dfe6edf4fb0209101702cb00710749c2c6336402a00f363d444b525960676e757c838a91989fa6adb4bbc2c9d0d7dee5ecf3fa01080f555c636a71787f868d949ba2a9b0b7bec5ccd3dae1e8eff6fd040b121920272e353c434a51585f666d747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e02"
+    },
+    {
+      "name": "announce with signature only",
+      "type": "announce",
+      "value": {
+        "signature": "dHuCiZCXnqWss7rByM/W3eTr8vkABw4VHCMqMTg/Rk1UW2JpcHd+hYyTmqGor7a9xMvS2eDn7vX8AwoRGB8mLQ==",
+        "bump": 0
+      },
+      "hex": "04747b828990979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d"
+    },
+    {
+      "name": "noise payload with version, error and firewall only",
+      "type": "noisePayload",
+      "value": {
+        "version": 1,
+        "error": 0,
+        "firewall": 2
+      },
+      "hex": "01000002"
+    },
+    {
+      "name": "noise payload with holepunch info",
+      "type": "noisePayload",
+      "value": {
+        "version": 1,
+        "error": 0,
+        "firewall": 1,
+        "holepunch": {
+          "id": 300,
+          "relays": [
+            {
+              "relayAddress": {
+                "host": "203.0.113.7",
+                "port": 49737
+              },
+              "peerAddress": {
+                "host": "198.51.100.2",
+                "port": 4000
+              }
+            }
+          ]
+        }
+      },
+      "hex": "01010001fd2c0101cb00710749c2c6336402a00f"
+    },
+    {
+      "name": "noise payload with IPv4 and IPv6 addresses and udx info",
+      "type": "noisePayload",
+      "value": {
+        "version": 1,
+        "error": 3,
+        "firewall": 2,
+        "addresses4": [
+          {
+            "host": "203.0.113.7",
+            "port": 49737
+          },
+          {
+            "host": "192.0.2.9",
+            "port": 33445
+          }
+        ],
+        "addresses6": [
+          {
+            "host": "2001:db8:0:0:0:0:0:1",
+            "port": 4000
+          }
+        ],
+        "udx": {
+          "version": 1,
+          "reusableSocket": true,
+          "id": 77,
+          "seq": 3
+        }
+      },
+      "hex": "010e030202cb00710749c2c0000209a5820120010db8000000000000000000000001a00f01014d03"
+    },
+    {
+      "name": "noise payload with secret stream, relay through and relay addresses",
+      "type": "noisePayload",
+      "value": {
+        "version": 1,
+        "error": 0,
+        "firewall": 0,
+        "secretStream": {
+          "version": 1
+        },
+        "relayThrough": {
+          "version": 1,
+          "publicKey": "k5qhqK+2vcTL0tng5+71/AMKERgfJi00O0JJUFdeZWw=",
+          "token": "srnAx87V3OPq8fj/Bg0UGyIpMDc+RUxTWmFob3Z9hIs="
+        },
+        "relayAddresses": [
+          {
+            "host": "255.255.255.255",
+            "port": 65535
+          }
+        ]
+      },
+      "hex": "01700000010100939aa1a8afb6bdc4cbd2d9e0e7eef5fc030a11181f262d343b424950575e656cb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e454c535a61686f767d848b01ffffffffffff"
+    }
+  ]
+}

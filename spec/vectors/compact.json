@@ -1,0 +1,244 @@
+{
+  "description": "compact-encoding primitives: uint and its fixed-width forms, int, bool, float64, buffer, string and fixed, with boundary values, truncated inputs and non-minimal uints",
+  "reference": "compact-encoding 3.5.2",
+  "cases": [
+    {
+      "name": "uint 0",
+      "type": "uint",
+      "value": 0,
+      "hex": "00"
+    },
+    {
+      "name": "uint 1",
+      "type": "uint",
+      "value": 1,
+      "hex": "01"
+    },
+    {
+      "name": "uint 252",
+      "type": "uint",
+      "value": 252,
+      "hex": "fc"
+    },
+    {
+      "name": "uint 253",
+      "type": "uint",
+      "value": 253,
+      "hex": "fdfd00"
+    },
+    {
+      "name": "uint 65535",
+      "type": "uint",
+      "value": 65535,
+      "hex": "fdffff"
+    },
+    {
+      "name": "uint 65536",
+      "type": "uint",
+      "value": 65536,
+      "hex": "fe00000100"
+    },
+    {
+      "name": "uint 4294967295",
+      "type": "uint",
+      "value": 4294967295,
+      "hex": "feffffffff"
+    },
+    {
+      "name": "uint 4294967296",
+      "type": "uint",
+      "value": 4294967296,
+      "hex": "ff0000000001000000"
+    },
+    {
+      "name": "uint 9007199254740991",
+      "type": "uint",
+      "value": 9007199254740991,
+      "hex": "ffffffffffffff1f00"
+    },
+    {
+      "name": "int -1",
+      "type": "int",
+      "value": -1,
+      "hex": "01"
+    },
+    {
+      "name": "int 0",
+      "type": "int",
+      "value": 0,
+      "hex": "00"
+    },
+    {
+      "name": "int 1",
+      "type": "int",
+      "value": 1,
+      "hex": "02"
+    },
+    {
+      "name": "int -2147483648",
+      "type": "int",
+      "value": -2147483648,
+      "hex": "feffffffff"
+    },
+    {
+      "name": "uint8 0",
+      "type": "uint8",
+      "value": 0,
+      "hex": "00"
+    },
+    {
+      "name": "uint8 255",
+      "type": "uint8",
+      "value": 255,
+      "hex": "ff"
+    },
+    {
+      "name": "uint16 0",
+      "type": "uint16",
+      "value": 0,
+      "hex": "0000"
+    },
+    {
+      "name": "uint16 65535",
+      "type": "uint16",
+      "value": 65535,
+      "hex": "ffff"
+    },
+    {
+      "name": "uint24 0",
+      "type": "uint24",
+      "value": 0,
+      "hex": "000000"
+    },
+    {
+      "name": "uint24 16777215",
+      "type": "uint24",
+      "value": 16777215,
+      "hex": "ffffff"
+    },
+    {
+      "name": "uint32 0",
+      "type": "uint32",
+      "value": 0,
+      "hex": "00000000"
+    },
+    {
+      "name": "uint32 4294967295",
+      "type": "uint32",
+      "value": 4294967295,
+      "hex": "ffffffff"
+    },
+    {
+      "name": "uint64 0",
+      "type": "uint64",
+      "value": 0,
+      "hex": "0000000000000000"
+    },
+    {
+      "name": "uint64 9007199254740991",
+      "type": "uint64",
+      "value": 9007199254740991,
+      "hex": "ffffffffffff1f00"
+    },
+    {
+      "name": "bool true",
+      "type": "bool",
+      "value": true,
+      "hex": "01"
+    },
+    {
+      "name": "bool false",
+      "type": "bool",
+      "value": false,
+      "hex": "00"
+    },
+    {
+      "name": "float64 0.5",
+      "type": "float64",
+      "value": 0.5,
+      "hex": "000000000000e03f"
+    },
+    {
+      "name": "float64 -1e300",
+      "type": "float64",
+      "value": -1e+300,
+      "hex": "9c7500883ce437fe"
+    },
+    {
+      "name": "buffer empty",
+      "type": "buffer",
+      "value": "",
+      "hex": "00"
+    },
+    {
+      "name": "buffer 300 bytes",
+      "type": "buffer",
+      "value": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fa000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30",
+      "hex": "fd2c01000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fa000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"
+    },
+    {
+      "name": "string ascii",
+      "type": "string",
+      "value": "hello",
+      "hex": "0568656c6c6f"
+    },
+    {
+      "name": "string unicode",
+      "type": "string",
+      "value": "héllo wörld ✓ 𝄞",
+      "hex": "1668c3a96c6c6f2077c3b6726c6420e29c9320f09d849e"
+    },
+    {
+      "name": "fixed 32",
+      "type": "fixed",
+      "value": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    }
+  ],
+  "decode_errors": [
+    {
+      "name": "uint empty",
+      "type": "uint",
+      "hex": "",
+      "error": "Out of bounds"
+    },
+    {
+      "name": "uint truncated 16-bit",
+      "type": "uint",
+      "hex": "fd01",
+      "error": "Out of bounds"
+    },
+    {
+      "name": "uint truncated 32-bit",
+      "type": "uint",
+      "hex": "fe0000",
+      "error": "Out of bounds"
+    },
+    {
+      "name": "buffer truncated",
+      "type": "buffer",
+      "hex": "0501",
+      "error": "Out of bounds"
+    },
+    {
+      "name": "string truncated",
+      "type": "string",
+      "hex": "0568656c",
+      "error": "Out of bounds"
+    }
+  ],
+  "decode_only": [
+    {
+      "name": "uint non-minimal 16-bit",
+      "type": "uint",
+      "value": 1,
+      "hex": "fd0100"
+    },
+    {
+      "name": "uint non-minimal 32-bit",
+      "type": "uint",
+      "value": 5,
+      "hex": "fe05000000"
+    }
+  ]
+}

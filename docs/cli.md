@@ -182,6 +182,9 @@ and two sets of LAN ports; a port already taken fails with `HB-LAN-PORT-IN-USE` 
 | `relay` | none | A relay key. The apps need the same one. |
 | `limits` | see [architecture.md](architecture.md#limits) | Overrides, e.g. `{ "sessionsPerKey": 8 }`. |
 
+The CLI writes a `lan` or `limits` value only when it differs from its default or the file already
+holds it, so a later release that changes a default reaches every host that never set it.
+
 Detected kinds live in a state file next to `host.json`, not in it. The application key is not in
 `host.json` either: it lives in `app.key` in the same directory (mode `0600`, shared by the host and
 the relay, [security.md](security.md#the-application-key)).
@@ -199,6 +202,8 @@ One Flutter app for TVs, phones and desktops.
 - **Typing the 9 symbols** (three groups of three, built for a remote; case and dashes do not
   matter) works once the app already holds that deployment's application key: from an earlier
   pairing or handoff, or compiled into a self-built app. The app tries each application key it holds.
+  The key part of a key link reads the same way, after the fragment is percent-decoded
+  ([security](security.md#the-key)). The application key in a link is always 64 lowercase hex digits.
 - **TV:** choose **Add from phone**. The TV shows a QR code; scan it with a phone that already has
   the host, pick the host, and the phone sends it, application key included, over your home
   network. Both must be on the same network
