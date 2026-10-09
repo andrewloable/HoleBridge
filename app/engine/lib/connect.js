@@ -6,6 +6,7 @@ const c = require('compact-encoding')
 const keys = require('./keys.js')
 const protocol = require('./protocol.js')
 const { Session, Budget, Counter } = require('./mux.js')
+const { relayPolicy } = require('./relay.js')
 
 const PROTOCOL = 'holebridge'
 const VERSION = 1
@@ -49,12 +50,13 @@ const handshake = {
 }
 
 /**
- * connectDirect({ dht, key, appKey, flags, lookupTimeout }) -> Promise<HostSession>
+ * connectDirect({ dht, key, appKey, relayKey, flags, lookupTimeout }) -> Promise<HostSession>
  *
  * dht is a HyperDHT the caller owns and this does not destroy. key is the typed key, appKey the 32-byte
- * application key. flags are the app's handshake flag bits (lan is not allowed here), default the
- * flags this engine supports. lookupTimeout is the ms the search and the handshake may take before
- * HB-LOOKUP-TIMEOUT, default 60000.
+ * application key. relayKey, when set, is the deployment's relay key: the dial may go through that relay
+ * (relay.js), and the dht should come from createDht with the same key. flags are the app's handshake
+ * flag bits (lan is not allowed here), default the flags this engine supports. lookupTimeout is the ms
+ * the search and the handshake may take before HB-LOOKUP-TIMEOUT, default 60000.
  *
  * Rejects with HB-LOOKUP-TIMEOUT when no host answers (HyperDHT's PEER_NOT_FOUND included) or the
  * handshake does not come in time, and with HB-VERSION-MISMATCH when the host speaks another version.
@@ -62,11 +64,18 @@ const handshake = {
  * The HostSession has services (the host's handshake list), lan (its lan block, or null), flags (its
  * handshake flags), route ('direct'), open(service) -> Promise<Stream>, destroy(), and emits 'close'
  * once the session ends. The route is always 'direct' here: HyperDHT does not say on the connection
- * whether it was relayed, so the relay task must set it.
+ * whether it was relayed, and the engine has no seam that forces the relayed route (HoleBridge-7vk.5).
  */
-async function connectDirect({ dht, key, appKey, flags = SUPPORTED_FLAGS, lookupTimeout = LOOKUP_TIMEOUT }) {
+async function connectDirect({ dht, key, appKey, relayKey, flags = SUPPORTED_FLAGS, lookupTimeout = LOOKUP_TIMEOUT }) {
   const pairs = await keys.derive(key, appKey)
-  const conn = dht.connect(pairs.host.publicKey, { keyPair: pairs.client })
+  const opts = { keyPair: pairs.client }
+  // With the relay key the dial may go through the relay (relay.js): the policy offers it when forced or
+  // when this side's NAT randomizes. Without it, dht.connect gets no relayThrough.
+  if (relayKey !== undefined && relayKey !== null) {
+    const { server } = await keys.deriveRelay(relayKey, appKey)
+    opts.relayThrough = relayPolicy({ relayServerPublicKey: server.publicKey, dht })
+  }
+  const conn = dht.connect(pairs.host.publicKey, opts)
   const mux = Protomux.from(conn)
   const closeListeners = []
   let pending = null // { resolve, reject } until the host's handshake settles the connect

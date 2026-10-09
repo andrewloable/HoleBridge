@@ -5,6 +5,7 @@
 const DHT = require('hyperdht')
 const Protomux = require('protomux')
 const TCP = require('bare-tcp')
+const NoiseSecretStream = require('@hyperswarm/secret-stream')
 const b4a = require('b4a')
 const keys = require('../../lib/keys.js')
 const protocol = require('../../lib/protocol.js')
@@ -46,25 +47,25 @@ function handshakeEntry(service) {
  *   (a TCP service at 127.0.0.1:port), 'refuse' (the open is rejected with code 3) or 'hang' (rejected
  *   with code 4 after HANG_MS). Default [].
  * - flags: handshake flag bits, default 0. The lan bit is set by the lan option, not here.
- * - lan: false (default), or { addresses, port } for the handshake's lan block.
+ * - lan: false (default), or { addresses, port } for the handshake's lan block, or true. true also starts
+ *   the LAN listener on 127.0.0.1 (a port the OS picks) and advertises it in the lan block with address
+ *   127.0.0.1. The listener runs the Noise handshake (IK) under the host key pair, and destroys any remote
+ *   key but the client key pair, as the DHT firewall does.
  * - version: protocol version in the handshake, default 1. Another value tests a version mismatch.
  *
  * The result has publicKey (the host public key to dial), client (the client key pair the firewall
- * admits, for the test to dial with) and close(), which stops the server, its sockets and its DHT node.
- * Nothing here logs keys.
+ * admits, for the test to dial with), lanPort (the LAN listener's TCP port, or null unless lan is true)
+ * and close(), which stops the servers, their sockets and its DHT node. Nothing here logs keys.
  */
 async function createFakeHost({ testnet, key, appKey, services = [], flags = 0, lan = false, version = 1 }) {
   const pairs = await keys.derive(keys.normalize(key), appKey)
   const byName = new Map(services.map((s) => [s.name, s]))
-  const hello = {
-    version,
-    flags: lan ? flags | protocol.FLAG.lan : flags & ~protocol.FLAG.lan,
-    services: services.map(handshakeEntry),
-    ...(lan ? { lan } : {})
-  }
   const budget = new Budget(256 * MIB)
-  const conns = new Set() // accepted app connections
+  const conns = new Set() // accepted app connections, from the DHT or the LAN
   const targets = new Set() // TCP sockets to service targets
+  let hello = null // the handshake the host sends, built once the LAN port is known
+  let lanServer = null
+  let lanPort = null
 
   const dht = new DHT({ bootstrap: testnet.bootstrap })
   const server = dht.createServer({
@@ -143,22 +144,53 @@ async function createFakeHost({ testnet, key, appKey, services = [], flags = 0, 
     })
   }
 
+  // lanAccept runs the LAN listener's side of one TCP connection: the Noise handshake under the host key
+  // pair, with the IK pattern the app's initiator uses, then serve for an admitted client. Any other
+  // remote key is destroyed.
+  const lanAccept = (socket) => {
+    conns.add(socket)
+    socket.once('close', () => conns.delete(socket))
+    socket.on('error', noop)
+    const stream = new NoiseSecretStream(false, socket, { keyPair: pairs.host, pattern: 'IK' })
+    stream.on('error', noop)
+    stream.opened.then((ok) => {
+      if (ok && b4a.equals(stream.remotePublicKey, pairs.client.publicKey)) serve(stream)
+      else stream.destroy()
+    })
+  }
+
   const close = async () => {
     for (const socket of conns) socket.destroy()
     for (const sock of targets) sock.destroy()
+    if (lanServer) await new Promise((resolve) => lanServer.close(() => resolve()))
     await server.close()
     await dht.destroy()
   }
 
   try {
     await dht.fullyBootstrapped()
+    if (lan === true) {
+      lanServer = TCP.createServer(lanAccept)
+      await new Promise((resolve, reject) => {
+        lanServer.once('error', reject)
+        lanServer.listen(0, '127.0.0.1', 511, {}, resolve)
+      })
+      lanPort = lanServer.address().port
+    }
+    const lanBlock = lan === true ? { addresses: ['127.0.0.1'], port: lanPort } : lan
+    hello = {
+      version,
+      flags: lan ? flags | protocol.FLAG.lan : flags & ~protocol.FLAG.lan,
+      services: services.map(handshakeEntry),
+      ...(lan ? { lan: lanBlock } : {})
+    }
     server.on('connection', serve)
     await server.listen(pairs.host)
   } catch (err) {
     await close()
     throw err
   }
-  return { publicKey: pairs.host.publicKey, client: pairs.client, close }
+  return { publicKey: pairs.host.publicKey, client: pairs.client, lanPort, close }
 }
 
 /**

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -214,6 +215,9 @@ func TestRelayWithoutRelayKeyExitsOneNamingNewKey(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit code = %d, want 1 (stderr %q)", code, stderr)
 	}
+	if !strings.Contains(stderr, "HB-RELAY-KEY-MISSING") {
+		t.Errorf("stderr does not carry HB-RELAY-KEY-MISSING: %q", stderr)
+	}
 	if !strings.Contains(stderr, "relay --new-key") {
 		t.Errorf("stderr does not name relay --new-key: %q", stderr)
 	}
@@ -227,6 +231,45 @@ func TestRelayWithoutRelayKeyExitsOneNamingNewKey(t *testing.T) {
 		t.Error("relay created relay.key")
 	}
 	assertNoSecret(t, "relay", stdout+stderr, hex.EncodeToString(appKey[:]))
+}
+
+// Edge case: a relay.key that group or others can read is refused, as app.key is, with HB-RELAY-KEY-PERMS.
+// Neither relay nor relay check starts anything, and the key is not printed. relay check refuses before it
+// starts a DHT node, so no test touches the network.
+func TestRelayKeyReadableByOthersIsRefused(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX mode bits")
+	}
+	relayKey, appKey, _ := vectors(t)
+	dir := t.TempDir()
+	writeAppKey(t, dir, appKey)
+	path := filepath.Join(dir, "relay.key")
+	writeRelayKey(t, path, relayKey)
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	calls := fakeStart(t, fakeRelay{})
+
+	code, stdout, stderr := run("--config", dir, "relay")
+	if code != 1 {
+		t.Errorf("relay exit code = %d, want 1 (stderr %q)", code, stderr)
+	}
+	if !strings.Contains(stderr, "HB-RELAY-KEY-PERMS") {
+		t.Errorf("relay stderr does not carry HB-RELAY-KEY-PERMS: %q", stderr)
+	}
+	if len(*calls) != 0 {
+		t.Errorf("the relay was started %d times, want 0", len(*calls))
+	}
+	assertNoSecret(t, "relay", stdout+stderr, relayKey, keys.Format(relayKey), hex.EncodeToString(appKey[:]))
+
+	code, stdout, stderr = run("--config", dir, "relay", "check", path)
+	if code != 1 {
+		t.Errorf("relay check exit code = %d, want 1 (stderr %q)", code, stderr)
+	}
+	if !strings.Contains(stderr, "HB-RELAY-KEY-PERMS") {
+		t.Errorf("relay check stderr does not carry HB-RELAY-KEY-PERMS: %q", stderr)
+	}
+	assertNoSecret(t, "relay check", stdout+stderr, relayKey, keys.Format(relayKey), hex.EncodeToString(appKey[:]))
 }
 
 // Case 3: relay runs the relay with the keys in relay.key and app.key, and prints the public key line
@@ -319,4 +362,39 @@ func TestRelayCheckWithAnotherAppKeyExitsOne(t *testing.T) {
 	}
 	assertNoSecret(t, "relay check", stdout+stderr,
 		relayKey, keys.Format(relayKey), hex.EncodeToString(appA[:]), hex.EncodeToString(appB[:]))
+}
+
+// Edge case: --bootstrap takes host:port nodes separated by commas, and refuses anything else with a usage
+// error, so a typo never starts a node on the wrong network.
+func TestParseBootstrapAcceptsNodesAndRefusesOthers(t *testing.T) {
+	got, err := parseBootstrap("192.0.2.1:49737,relay.example:5000")
+	if err != nil || len(got) != 2 || got[0] != "192.0.2.1:49737" || got[1] != "relay.example:5000" {
+		t.Fatalf("parseBootstrap of two nodes = %q, %v", got, err)
+	}
+	for _, bad := range []string{"", "192.0.2.1", ":49737", "192.0.2.1:0", "192.0.2.1:70000", "192.0.2.1:49737,,192.0.2.2:1", "192.0.2.1:x"} {
+		if _, err := parseBootstrap(bad); err == nil {
+			t.Errorf("parseBootstrap(%q) accepted a bad node", bad)
+		}
+	}
+}
+
+// Edge case: relay check with --bootstrap uses the nodes of the flag, not the default list. The default list is
+// the public network, which a test must not reach, so this run passes only if the flag is honoured.
+func TestRelayCheckBootstrapFlagReplacesDefault(t *testing.T) {
+	tn := hyperdht.NewTestnet(t, testnetSize)
+	relayKey, appKey, _ := vectors(t)
+	startTestRelay(t, tn, relayKey, appKey)
+
+	dir := t.TempDir()
+	writeAppKey(t, dir, appKey)
+	keyFile := filepath.Join(t.TempDir(), "relay.key")
+	writeRelayKey(t, keyFile, relayKey)
+
+	code, stdout, stderr := run("--config", dir, "relay", "check", keyFile, "--bootstrap", strings.Join(tn.Bootstrap, ","))
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (stdout %q, stderr %q)", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "member: admitted") {
+		t.Errorf("stdout does not admit the member: %q", stdout)
+	}
 }

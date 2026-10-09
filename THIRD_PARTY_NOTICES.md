@@ -198,13 +198,14 @@ also stays in the header of each ported file.
 |---|---|---|
 | kademlia-routing-table 1.0.6 | index.js | MIT |
 | libsodium 1.0.20, crypto_secretstream_xchacha20poly1305 | src/libsodium/crypto_secretstream/xchacha20poly1305/secretstream_xchacha20poly1305.c | ISC |
-| libudx (UDX transport) | udx.h, udx.c | Apache-2.0 |
+| libudx (UDX transport) | udx.h, udx.c, udx_rate.c, udx_bbr.c | Apache-2.0 |
+| libudx windowed min and max filter (Copyright 2017, Google Inc.; within libudx ae8bff7) | win_filter.c, win_filter_f64.c | BSD-3-Clause |
 | compact-encoding 3.5.2 (pears/compact) | index.js | Apache-2.0 |
 | noise-handshake 4.2.0 (pears/noise) | noise.js, symmetric-state.js, cipher.js, hkdf.js, hmac.js | Apache-2.0 |
 | noise-curve-ed 2.1.0 (pears/noise) | index.js | ISC |
 | dht-rpc 6.27.0 (pears/dhtrpc messages, node, nat and query) | lib/io.js, lib/peer.js, lib/query.js, index.js, lib/commands.js, lib/errors.js | MIT |
 | nat-sampler 1.0.1 (pears/dhtrpc nat) | index.js | MIT |
-| hyperdht 6.34.1 (pears/hyperdht messages, dht, announce, server, router, connect, relay and holepunch) | lib/messages.js, index.js (announce, unannounce, lookup, constructor key pair, createServer, connect), lib/persistent.js (lookup, announce and unannounce records, routes, refresh, find-peer, signatures), lib/constants.js (command numbers), lib/server.js (listen, close, firewall, handshake reply, the relay of a handshake, the holepunch reply and the direct connection), lib/router.js (handshake and holepunch routing), lib/connect.js (find-peer walk, connect through a node, the direct reply, the relay-through selection and relay pairing, localAddresses and matchAddress), lib/holepuncher.js (the punch state machine), lib/nat.js (the NAT sampler), lib/secure-payload.js (the encrypted holepunch payload) | MIT |
+| hyperdht 6.34.1 (pears/hyperdht messages, dht, announce, server, router, connect, relay and holepunch) | lib/messages.js, index.js (announce, unannounce, lookup, constructor key pair, createServer, connect, the randomized-punch limit and interval), lib/persistent.js (lookup, announce and unannounce records, routes, refresh, find-peer, signatures), lib/constants.js (command numbers and the default BOOTSTRAP_NODES list, in internal/cli/relay.go), lib/server.js (listen, close, firewall, handshake reply, the relay of a handshake, the holepunch reply and the direct connection), lib/router.js (handshake and holepunch routing), lib/connect.js (find-peer walk, connect through a node, the direct reply, the relay-through selection and relay pairing, localAddresses and matchAddress), lib/holepuncher.js (the punch state machine), lib/nat.js (the NAT sampler), lib/secure-payload.js (the encrypted holepunch payload), lib/socket-pool.js (the routing of a one-byte holepunch datagram, in pears/dhtrpc punch) | MIT |
 | protomux 3.12.1 (pears/protomux) | index.js | MIT |
 | blind-relay 1.6.1 (pears/blindrelay, pairing, message encodings and forwarding) | index.js | Apache-2.0 |
 | @hyperswarm/secret-stream 6.9.2 (pears/secretstream) | index.js, lib/handshake.js | Apache-2.0 |

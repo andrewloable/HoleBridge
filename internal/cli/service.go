@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/andrewloable/HoleBridge/internal/config"
 	"github.com/andrewloable/HoleBridge/internal/errs"
+	"github.com/andrewloable/HoleBridge/internal/status"
 )
 
 // The service commands register themselves here, so cli.go does not change when they are built.
@@ -79,7 +81,7 @@ func serviceAdd(args []string, env Env, configDir string) error {
 	if err := config.Save(dir, c); err != nil {
 		return err
 	}
-	noteRestart(dir, env)
+	applyToHost(dir, env)
 	return nil
 }
 
@@ -122,7 +124,7 @@ func serviceRm(args []string, env Env, configDir string) error {
 			return err
 		}
 	}
-	noteRestart(dir, env)
+	applyToHost(dir, env)
 	return nil
 }
 
@@ -232,6 +234,32 @@ func noteRestart(dir string, env Env) {
 	if hostRunning(dir) {
 		fmt.Fprintln(env.Stdout, "restart holebridge host to apply")
 	}
+}
+
+// applyToHost runs after service add or rm has saved host.json. A running host is asked to reload over the control
+// socket: when it reloads, the change is applied and that is printed in place of the restart note. When it cannot
+// be asked, the restart note is printed as before (docs/cli.md, hosting).
+func applyToHost(dir string, env Env) {
+	if !hostRunning(dir) {
+		return
+	}
+	if reloaded(dir) {
+		fmt.Fprintln(env.Stdout, "change applied to the running host")
+		return
+	}
+	fmt.Fprintln(env.Stdout, "restart holebridge host to apply")
+}
+
+// reloaded asks the host in dir to reload over the control socket, and reports whether it answered that it did.
+func reloaded(dir string) bool {
+	ans, err := status.Query(dir, "reload")
+	if err != nil {
+		return false
+	}
+	var a struct {
+		OK bool `json:"ok"`
+	}
+	return json.Unmarshal(ans, &a) == nil && a.OK
 }
 
 // hostRunning reports whether host.lock in dir names a live process. The host writes its process

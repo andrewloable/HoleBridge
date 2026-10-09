@@ -52,7 +52,9 @@ type Config struct {
 // Node is a DHT node: a Kademlia routing table, the built-in commands and the custom commands that
 // Handle registers. Start one with New.
 type Node struct {
-	sock       *udx.Socket // the UDP socket: the RPC side is sock.Raw, and UDX streams use sock
+	sock       *udx.Socket  // the UDP socket: the RPC side is sock.Raw, and UDX streams use sock
+	udp        *net.UDPConn // the same socket, for the holepunch datagrams, which carry their own TTL
+	ttlMu      sync.Mutex   // serializes the TTL that SendPunch sets on udp
 	local      *net.UDPAddr
 	rpc        *IO
 	id         [32]byte    // our table id: the peer id of our address when persistent, else random
@@ -102,6 +104,7 @@ func open(cfg Config, ip net.IP) (*Node, error) {
 	local := conn.LocalAddr().(*net.UDPAddr)
 	n := &Node{
 		sock:     sock,
+		udp:      conn,
 		local:    local,
 		boot:     boot,
 		ready:    make(chan struct{}),
@@ -278,6 +281,14 @@ func (n *Node) handle(req *Request, from *net.UDPAddr) *Response {
 	return &Response{ID: n.selfID(), Error: errUnknownCommand}
 }
 
+// tableID returns our table id. Bootstrap rewrites it when the node becomes persistent, so a reader that runs
+// beside a query takes it under mu.
+func (n *Node) tableID() [32]byte {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.id
+}
+
 // selfID returns the id that goes out with our requests and replies. An ephemeral node sends none, as
 // upstream sends the id only from a persistent node.
 func (n *Node) selfID() []byte {
@@ -426,14 +437,15 @@ func (n *Node) findBoot() {
 // findNear asks addr for the nodes nearest our id, and pings each node that it names. A ping that is
 // answered by a persistent node adds that node to the table.
 func (n *Node) findNear(addr *net.UDPAddr) {
-	resp, err := n.request(addr, Request{Internal: true, Command: cmdFindNode, Target: n.id[:]})
+	id := n.tableID()
+	resp, err := n.request(addr, Request{Internal: true, Command: cmdFindNode, Target: id[:]})
 	if err != nil {
 		return
 	}
 	var wg sync.WaitGroup
 	for _, a := range resp.CloserNodes {
 		near := &net.UDPAddr{IP: net.IP(a.Host.AsSlice()), Port: int(a.Port)}
-		if nodeID(near) == n.id {
+		if nodeID(near) == id {
 			continue
 		}
 		wg.Add(1)

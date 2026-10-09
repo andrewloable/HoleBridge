@@ -379,3 +379,138 @@ func TestFullOrderedQueueDropsNotDelays(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// slowAddr is the target of the service "slow" in the tests below. Its dial is a hook that blocks until the
+// test releases it, which stands in for a name lookup that takes seconds.
+const slowAddr = "192.0.2.1:9"
+
+// slowResolver maps "echo" to the target socket and "slow" to slowAddr, and rejects any other service.
+func slowResolver(target net.PacketConn) func(string) (string, bool) {
+	return func(service string) (string, bool) {
+		switch service {
+		case "echo":
+			return target.LocalAddr().String(), true
+		case "slow":
+			return slowAddr, true
+		}
+		return "", false
+	}
+}
+
+// Case 8 (review fix): a slow lookup for one flow stalls no other flow of the table. While the lookup is
+// blocked, a datagram for an open flow still reaches its target, Stats and a new flow return at once, and
+// the blocked flow holds its slot, so a flow past the session cap is refused.
+func TestSlowLookupStallsNoOtherFlow(t *testing.T) {
+	defer failOnPanic(t)
+	target := listen(t)
+	send, _ := recorder()
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	cfg := config()
+	cfg.PerSession = NewCounter(2) // flow 1 and the slow flow 2 take both slots
+	cfg.Dial = func(network, address string) (net.Conn, error) {
+		if address == slowAddr {
+			close(entered)
+			<-release
+		}
+		return net.Dial(network, target.LocalAddr().String())
+	}
+	tb := NewTable(cfg, send, slowResolver(target), time.Now)
+	t.Cleanup(tb.Close)
+
+	tb.OnFlow(protocol.Flow{Flow: 1, Service: "echo", Payload: []byte("hello")})
+	read(t, target) // the first payload of flow 1
+
+	slowDone := make(chan struct{})
+	go func() {
+		tb.OnFlow(protocol.Flow{Flow: 2, Service: "slow", Payload: []byte("slow")})
+		close(slowDone)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the slow lookup did not start within 2 s")
+	}
+
+	// While the lookup is blocked, these must all return at once.
+	ok := make(chan struct{})
+	go func() {
+		tb.OnDatagram(1, []byte("ping"))
+		tb.Stats()
+		tb.OnFlow(protocol.Flow{Flow: 3, Service: "echo", Payload: []byte("third")})
+		close(ok)
+	}()
+	select {
+	case <-ok:
+	case <-time.After(time.Second):
+		t.Fatal("datagrams, Stats and a new flow stalled behind a slow lookup of another flow")
+	}
+	if payload, _ := read(t, target); string(payload) != "ping" {
+		t.Fatalf("target got %q while the lookup was blocked, want the datagram %q of flow 1", payload, "ping")
+	}
+	if s := tb.Stats(); s.Open != 1 || s.Dropped.Limit != 1 {
+		t.Fatalf("while the slow lookup is blocked: Open = %d, Dropped.Limit = %d, want 1 and 1: the blocked flow holds its slot", s.Open, s.Dropped.Limit)
+	}
+
+	close(release)
+	select {
+	case <-slowDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the slow flow did not return after its lookup was released")
+	}
+	waitOpen(t, tb, 2)
+	if payload, _ := read(t, target); string(payload) != "slow" {
+		t.Fatalf("target got %q from the slow flow, want its first payload %q", payload, "slow")
+	}
+	tb.OnDatagram(2, []byte("second"))
+	if payload, _ := read(t, target); string(payload) != "second" {
+		t.Fatalf("target got %q from the slow flow, want %q", payload, "second")
+	}
+}
+
+// Case 9 (review fix): Close while a lookup is under way leaves no socket behind and gives the slot back.
+func TestCloseDuringSlowLookupReleasesSlot(t *testing.T) {
+	defer failOnPanic(t)
+	target := listen(t)
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	dialed := make(chan net.Conn, 1)
+	cfg := config()
+	cfg.PerSession = NewCounter(1)
+	cfg.Dial = func(network, address string) (net.Conn, error) {
+		close(entered)
+		<-release
+		conn, err := net.Dial(network, target.LocalAddr().String())
+		dialed <- conn
+		return conn, err
+	}
+	tb := NewTable(cfg, discard, resolver(target), time.Now)
+
+	done := make(chan struct{})
+	go func() {
+		tb.OnFlow(protocol.Flow{Flow: 7, Service: "echo", Payload: []byte("hi")})
+		close(done)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the lookup did not start within 2 s")
+	}
+	tb.Close()
+	close(release)
+	<-done
+
+	conn := <-dialed
+	if conn == nil {
+		t.Fatal("the dial hook returned no socket")
+	}
+	if _, err := conn.Write([]byte("late")); err == nil {
+		t.Fatal("a socket dialed after Close is still open")
+	}
+	// The slot is free again: a second table of the same session takes it.
+	cfg.Dial = net.Dial
+	next := NewTable(cfg, discard, resolver(target), time.Now)
+	t.Cleanup(next.Close)
+	next.OnFlow(protocol.Flow{Flow: 8, Service: "echo", Payload: []byte("hi")})
+	waitOpen(t, next, 1)
+}

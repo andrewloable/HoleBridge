@@ -33,6 +33,10 @@ type Config struct {
 	// OrderedQueue is the size in bytes of the ordered queue on the LAN route: 256 KiB. New datagrams
 	// are dropped when it is full. Zero means no queue: replies go straight to send.
 	OrderedQueue int
+
+	// Dial opens a flow's socket: the name lookup of a host name in the address happens here. Nil means
+	// net.Dial. Tests set it to slow the lookup down.
+	Dial func(network, address string) (net.Conn, error)
 }
 
 // Counter caps the flows open across the tables that share it. Make one with NewCounter.
@@ -99,6 +103,7 @@ type Table struct {
 	mu      sync.Mutex
 	cond    *sync.Cond // wakes the queue drainer
 	flows   map[uint64]*flow
+	dialing map[uint64]bool // flow ids whose target lookup and dial are under way, without mu
 	dropped Dropped
 	queue   []reply
 	queued  int // bytes in queue
@@ -139,13 +144,17 @@ type Stats struct {
 // The payload send gets is only valid during the call. Target must not call back into the table.
 // Call Close when the table is no longer used: it stops the table's goroutines.
 func NewTable(cfg Config, send func(flow uint64, payload []byte), target func(service string) (string, bool), clock func() time.Time) *Table {
+	if cfg.Dial == nil {
+		cfg.Dial = net.Dial
+	}
 	t := &Table{
-		cfg:    cfg,
-		send:   send,
-		target: target,
-		clock:  clock,
-		flows:  make(map[uint64]*flow),
-		done:   make(chan struct{}),
+		cfg:     cfg,
+		send:    send,
+		target:  target,
+		clock:   clock,
+		flows:   make(map[uint64]*flow),
+		dialing: make(map[uint64]bool),
+		done:    make(chan struct{}),
 	}
 	t.cond = sync.NewCond(&t.mu)
 	go t.sweep()
@@ -156,7 +165,11 @@ func NewTable(cfg Config, send func(flow uint64, payload []byte), target func(se
 }
 
 // OnFlow opens a flow: a UDP socket connected to the service's target, which sends the first payload.
-// A flow id that is already open gets the payload as a datagram instead.
+// A flow id that is already open gets the payload as a datagram instead. The flow's slot and id are
+// reserved under the lock; the target lookup and the dial run without it, so a slow lookup stalls no
+// other flow. A flow id that is still being dialed gets its payload dropped, as UDP allows. The first
+// payload is written before the flow is visible to OnDatagram, so a datagram that follows it on the
+// session cannot overtake it, even when OnFlow runs on its own goroutine.
 func (t *Table) OnFlow(f protocol.Flow) {
 	t.mu.Lock()
 	if t.closed {
@@ -168,9 +181,7 @@ func (t *Table) OnFlow(f protocol.Flow) {
 		t.OnDatagram(f.Flow, f.Payload)
 		return
 	}
-	addr, ok := t.target(f.Service)
-	if !ok {
-		t.dropped.Unknown++
+	if t.dialing[f.Flow] { // a dial for this id is under way; this payload is dropped
 		t.mu.Unlock()
 		return
 	}
@@ -179,17 +190,49 @@ func (t *Table) OnFlow(f protocol.Flow) {
 		t.mu.Unlock()
 		return
 	}
-	conn, err := net.Dial("udp", addr) // a connected socket: the kernel drops other sources
-	if err != nil {
-		t.cfg.give()
-		t.mu.Unlock()
-		return
-	}
-	fl := &flow{conn: conn, last: t.clock()}
-	t.flows[f.Flow] = fl
-	go t.pump(f.Flow, fl)
+	t.dialing[f.Flow] = true
 	t.mu.Unlock()
-	t.OnDatagram(f.Flow, f.Payload)
+
+	addr, ok := t.target(f.Service)
+	var conn net.Conn
+	var err error
+	if ok {
+		conn, err = t.cfg.Dial("udp", addr) // a connected socket: the kernel drops other sources
+	}
+	if ok && err == nil && len(f.Payload) <= t.cfg.MaxDatagram {
+		conn.Write(f.Payload) // not yet visible to OnDatagram: nothing later can overtake it
+	}
+
+	t.mu.Lock()
+	delete(t.dialing, f.Flow)
+	switch {
+	case t.closed: // Close ran during the lookup and did not see this flow
+		t.cfg.give()
+		if conn != nil {
+			conn.Close()
+		}
+	case !ok:
+		t.dropped.Unknown++
+		t.cfg.give()
+	case err != nil:
+		t.cfg.give()
+	default:
+		if len(f.Payload) > t.cfg.MaxDatagram {
+			t.dropped.TooLarge++
+		}
+		fl := &flow{conn: conn, last: t.clock()}
+		t.flows[f.Flow] = fl
+		go t.pump(f.Flow, fl)
+	}
+	t.mu.Unlock()
+}
+
+// Has reports whether the table has the flow open. A flow that is still being dialed is not open.
+func (t *Table) Has(flow uint64) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	_, ok := t.flows[flow]
+	return ok
 }
 
 // OnDatagram sends a datagram from the session to a flow's target. A datagram for a flow the table

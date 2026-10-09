@@ -28,8 +28,10 @@ const (
 	openWait      = 30 * time.Second // a stream's answer from the host
 
 	// datagramQueue is how many received datagrams wait for Datagram. A datagram that finds the queue full
-	// is dropped, as UDP drops it.
+	// is dropped, as UDP drops it. servicesQueue is how many services lists wait for NextServices; a full
+	// queue holds the channel's reads until one is taken, since a list is not dropped.
 	datagramQueue = 256
+	servicesQueue = 16
 
 	// window and budget are the app's limits (docs/architecture.md, Limits): 2 MiB per stream, 64 MiB in all.
 	window = 2 << 20
@@ -55,8 +57,9 @@ type connection struct {
 	ch     *protomux.Channel
 	msgs   []*protomux.Message // one per message index, in index order
 	hs     protocol.Handshake
-	dgrams chan protocol.Datagram // the datagrams the host sent on the channel, message 10
-	closed chan struct{}          // closed when the channel closes
+	dgrams chan protocol.Datagram  // the datagrams the host sent on the channel, message 10
+	servs  chan []protocol.Service // the services lists the host pushed, message 8, for NextServices
+	closed chan struct{}           // closed when the channel closes
 	once   sync.Once
 }
 
@@ -100,7 +103,12 @@ func dial(dht *hyperdht.DHT, hostPub [32]byte, clientKP ed25519.PrivateKey) (*se
 // returns the session, resumable, and its connection once the host's handshake has arrived. It closes conn
 // when that fails.
 func open(conn *secretstream.Stream) (*mux.Session, *connection, error) {
-	k := &connection{stream: conn, closed: make(chan struct{}), dgrams: make(chan protocol.Datagram, datagramQueue)}
+	k := &connection{
+		stream: conn,
+		closed: make(chan struct{}),
+		dgrams: make(chan protocol.Datagram, datagramQueue),
+		servs:  make(chan []protocol.Service, servicesQueue),
+	}
 	k.sess = mux.NewSession(mux.RoleApp, k, mux.Config{Window: window}, mux.NewBudget(budget), nil)
 	if err := k.sess.EnableResume(); err != nil {
 		conn.Close()
@@ -175,6 +183,15 @@ func (k *connection) queue(d protocol.Datagram) {
 	}
 }
 
+// queueServices hands a services list to NextServices. It waits while the queue is full, unless the channel
+// closes first: a list is not dropped the way a datagram is.
+func (k *connection) queueServices(list []protocol.Service) {
+	select {
+	case k.servs <- list:
+	case <-k.closed:
+	}
+}
+
 // receive returns the handler of message index: it decodes the payload and hands the message to the session.
 // A message the session cannot take ends the connection.
 func (k *connection) receive(index int) func([]byte) {
@@ -182,6 +199,10 @@ func (k *connection) receive(index int) func([]byte) {
 		msg, err := protocol.Decode(index, payload)
 		if d, ok := msg.(protocol.Datagram); ok && err == nil {
 			k.queue(d)
+			return
+		}
+		if s, ok := msg.(protocol.Services); ok && err == nil {
+			k.queueServices(s.Services)
 			return
 		}
 		if err == nil {
@@ -249,13 +270,25 @@ func (c *Client) Datagram(ctx context.Context) (protocol.Datagram, error) {
 // NextServices waits for the next services list the host pushes (message 8) and returns its services. It fails
 // when ctx ends first, or when the channel closes before a list arrives.
 func (c *Client) NextServices(ctx context.Context) ([]protocol.Service, error) {
-	return nil, errors.ErrUnsupported
+	select {
+	case list := <-c.cur.servs:
+		return list, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-c.cur.closed:
+		return nil, errors.New("hosttest: the channel closed before a services list arrived")
+	}
 }
 
 // WaitClosed waits until the host closes the client's channel, which ends the session the app sees, and
 // returns nil. It returns ctx's error when ctx ends first.
 func (c *Client) WaitClosed(ctx context.Context) error {
-	return errors.ErrUnsupported
+	select {
+	case <-c.cur.closed:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Close ends the session and its channel.

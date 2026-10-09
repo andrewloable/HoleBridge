@@ -237,6 +237,7 @@ test('A box with the wrong secret gets byte 0 and the listener keeps waiting', c
     const refusal = await rejectionOf(send(badLink, { name, key, appKey: hex(appKeyHex) }), 'send with a wrong secret')
     t.is(refusal.name, 'HbError', 'the phone gets an HbError')
     t.is(refusal.reason, 'refused', 'with reason refused')
+    t.is(refusal.code, 'HB-HANDOFF-REFUSED', 'with code HB-HANDOFF-REFUSED')
 
     await within(send(l.link, { name, key, appKey: hex(appKeyHex) }), 'send with the right secret')
     const value = unwrap(await within(received.done, 'received'))

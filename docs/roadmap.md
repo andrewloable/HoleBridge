@@ -139,7 +139,7 @@ phones and Android TV.
     (decisions D37);
   - the diagnostics screen.
 - **Docs that ship with it:** `docs/install.md`, `docs/apps.md` (using native apps through
-  HoleBridge), `docs/relay.md` (VPS walkthrough), `docs/errors.md`.
+  HoleBridge), [docs/relay.md](relay.md) (VPS walkthrough), `docs/errors.md`.
 - **The key-link page:** on the project domain (decisions Q8); it also serves the TV handoff
   link.
 - **Tests and checks:** end-to-end tests at each layer, and the real-network checklist.

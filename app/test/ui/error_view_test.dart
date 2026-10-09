@@ -44,7 +44,8 @@ void main() {
   });
 
   testWidgets('an unknown code shows the generic text and the code', (tester) async {
-    const code = 'HB-NOT-A-CODE';
+    // Built from parts so the HB- code checker does not read it as a catalog code (as errs_test.go does).
+    const code = 'HB-' 'NOT-A-CODE';
     await tester.pumpWidget(MaterialApp(home: ErrorView(code, 'detail', openLink: (_) async {})));
 
     final text = shownText(tester);

@@ -16,6 +16,9 @@ class FakeControl {
   final List<String> calls = [];
   PlatformException? nextStartError;
   PlatformException? terminateError;
+
+  /// Whether the next start reattaches to the worklet still running, as after a Dart hot restart.
+  bool nextReattached = false;
   int _generation = 0;
 
   /// The generation of the worklet the fake native side still runs, or null when none does.
@@ -36,7 +39,9 @@ class FakeControl {
               throw error;
             }
             live = ++_generation;
-            return {'generationId': live, 'reattached': false};
+            final reattached = nextReattached;
+            nextReattached = false;
+            return {'generationId': live, 'reattached': reattached};
           case 'terminate':
             final error = terminateError;
             if (error != null) throw error;
@@ -79,6 +84,13 @@ Set<String> _engineDirs() => Directory.systemTemp
     .where((path) => path.split(Platform.pathSeparator).last.startsWith('holebridge-engine-'))
     .toSet();
 
+/// Leaves a bundle copy in the temp folder, named as a copy written by the process [ownerPid].
+Directory _makeCopy(int ownerPid) {
+  final dir = Directory.systemTemp.createTempSync('holebridge-engine-$ownerPid-');
+  File('${dir.path}${Platform.pathSeparator}engine.bundle').writeAsBytesSync(_bundle);
+  return dir;
+}
+
 void main() {
   late FakeControl control;
   late Set<String> engineDirsBefore;
@@ -93,6 +105,8 @@ void main() {
         final key = utf8.decode(
           message!.buffer.asUint8List(message.offsetInBytes, message.lengthInBytes),
         );
+        // The bundle, and an empty addon list: these tests load no native addons.
+        if (key == addonsList) return ByteData(0);
         return key == engineAsset ? ByteData.sublistView(_bundle) : null;
       },
     );
@@ -130,6 +144,35 @@ void main() {
     );
     await host.stop();
     expect(_dirOf(control.bundlePaths.last).existsSync(), isFalse);
+  });
+
+  test('start writes each native addon at the path the bundle loads it from', () async {
+    final addon = Uint8List.fromList([5, 6, 7]);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMessageHandler(
+      'flutter/assets',
+      (message) async {
+        final key = utf8.decode(
+          message!.buffer.asUint8List(message.offsetInBytes, message.lengthInBytes),
+        );
+        if (key == addonsList) {
+          return ByteData.sublistView(
+            Uint8List.fromList(utf8.encode('node_modules/bare-x/prebuilds/p/bare-x.bare\n')),
+          );
+        }
+        if (key == '${addonsDir}bare-x.bare') return ByteData.sublistView(addon);
+        return key == engineAsset ? ByteData.sublistView(_bundle) : null;
+      },
+    );
+    final host = EngineHost();
+
+    await host.start();
+
+    final copy = _dirOf(control.bundlePaths.single);
+    expect(
+      File('${copy.path}/node_modules/bare-x/prebuilds/p/bare-x.bare').readAsBytesSync(),
+      addon,
+    );
+    await host.stop();
   });
 
   test('a failed start removes its bundle copy, and a retry starts cleanly', () async {
@@ -174,4 +217,72 @@ void main() {
     );
     expect(() => host.frames, throwsStateError, reason: 'stop must forget the worklet');
   });
+
+  test('stop during an in-flight start terminates the worklet that start brings up', () async {
+    final host = EngineHost();
+    final starting = host.start();
+    final stopping = host.stop();
+
+    await Future.wait([starting, stopping]);
+
+    expect(control.live, isNull, reason: 'a worklet survived stop');
+    expect(control.calls.last, 'terminate');
+    expect(
+      _dirOf(control.bundlePaths.single).existsSync(),
+      isFalse,
+      reason: 'stop must remove the copy of the start it waited for',
+    );
+  });
+
+  test('start removes the copy of a process that has exited, and keeps its own', () async {
+    final gone = _makeCopy(999999999); // above any pid the OS hands out: no such process
+    final host = EngineHost();
+
+    await host.start();
+
+    expect(gone.existsSync(), isFalse, reason: 'the copy of an exited process is still on disk');
+    expect(_dirOf(control.bundlePaths.single).existsSync(), isTrue);
+    await host.stop();
+  });
+
+  test('start keeps the copy of another live app process', () async {
+    final other = await Process.start('sleep', ['60']);
+    addTearDown(() async {
+      other.kill();
+      await other.exitCode;
+    });
+    final theirs = _makeCopy(other.pid);
+    final host = EngineHost();
+
+    await host.start();
+
+    expect(theirs.existsSync(), isTrue, reason: 'a live process still owns this copy');
+    await host.stop();
+    theirs.deleteSync(recursive: true);
+  });
+
+  test(
+    'a hot restart keeps the copy a reattached worklet may run from, until a fresh boot',
+    () async {
+      // The copy the worklet started before the hot restart; the Dart host that wrote it is gone.
+      final orphan = _makeCopy(pid);
+      control.nextReattached = true;
+      final restarted = EngineHost();
+
+      await restarted.start();
+
+      expect(orphan.existsSync(), isTrue, reason: 'the reattached worklet may still run from it');
+      await restarted.stop();
+
+      final fresh = EngineHost();
+      await fresh.start();
+
+      expect(
+        orphan.existsSync(),
+        isFalse,
+        reason: 'a fresh boot leaves no copy of this process unused',
+      );
+      await fresh.stop();
+    },
+  );
 }

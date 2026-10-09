@@ -54,6 +54,9 @@ type Options struct {
 	// streamOptions is a test hook. When set, the host calls it with the secret-stream options each session's
 	// stream is set up with. Nil in production.
 	streamOptions func(secretstream.Options)
+	// udpDial is a test hook: the dialer of each UDP flow's socket, where a host name's lookup happens. Nil means
+	// net.Dial. Nil in production.
+	udpDial func(network, address string) (net.Conn, error)
 }
 
 // keepalive is the secret-stream keepalive interval of every session: upstream's connectionKeepAlive, 5 s
@@ -89,22 +92,32 @@ type Host struct {
 	dht           *hyperdht.DHT
 	dial          func(ctx context.Context, network, addr string) (net.Conn, error)
 	clock         func() time.Time
-	kinds         func(service string) protocol.Kind // the kinds watcher, or nil
-	streamOptions func(secretstream.Options)         // test hook: the options each DHT session is set up with
+	kinds         func(service string) protocol.Kind              // the kinds watcher, or nil
+	streamOptions func(secretstream.Options)                      // test hook: the options each DHT session is set up with
+	udpDial       func(network, address string) (net.Conn, error) // test hook: the dialer of each UDP flow, nil for net.Dial
 	limits        config.Limits
-	kp            noise.KeyPair      // the host key pair the server listens under
-	clientPub     [32]byte           // the one key the firewall admits
-	lan           bool               // the LAN route is on: each handshake carries the LAN block
-	lanPort       uint64             // the LAN TCP port, from host.json
-	names         []string           // the service names, sorted: the handshake lists them in this order
-	services      map[string]service // by name: what an open is dialed to
-	budget        *mux.Budget        // the receive budget, shared by the process's sessions
-	streams       *mux.Counter       // the streams in total, shared by the process's sessions
-	udp           *udpflow.Counter   // the UDP flows in total, shared by the process's sessions
-	resume        *mux.ResumeTable   // the streams of every session; a dropped session's streams wait here for a reattach
+	dir           string           // the config directory Reload re-reads host.json from; empty means none
+	appKey        [32]byte         // the application key Reload derives the key pairs with: a secret, never logged
+	lan           bool             // the LAN route is on: each handshake carries the LAN block
+	lanPort       uint64           // the LAN TCP port, from host.json
+	budget        *mux.Budget      // the receive budget, shared by the process's sessions
+	streams       *mux.Counter     // the streams in total, shared by the process's sessions
+	udp           *udpflow.Counter // the UDP flows in total, shared by the process's sessions
+	resume        *mux.ResumeTable // the streams of every session; a dropped session's streams wait here for a reattach
 
-	mu    sync.Mutex
-	conns map[*hyperdht.Conn]struct{} // the live connections: one session each, for the one key
+	// lifeMu serialises Run's start and stop with Reload, which may listen again under a new key. ctx is the
+	// context Run was given; a reload that listens again uses it.
+	lifeMu sync.Mutex
+	ctx    context.Context
+
+	mu        sync.Mutex
+	kp        noise.KeyPair               // the host key pair the server listens under
+	clientPub [32]byte                    // the one key the firewall admits
+	srv       *hyperdht.Server            // the server that serves now; nil while Run does not listen
+	names     []string                    // the service names, sorted: the handshake lists them in this order
+	services  map[string]service          // by name: what an open is dialed to
+	conns     map[*hyperdht.Conn]struct{} // the live connections: one session each, for the one key
+	links     map[*link]struct{}          // the sessions, each with a channel a services list can be pushed on
 }
 
 // New returns a host for cfg. The host key pair and the client key pair come from cfg.Key and appKey
@@ -117,6 +130,10 @@ func New(cfg *config.Config, appKey [32]byte, opts Options) (*Host, error) {
 	if opts.DHT == nil {
 		return nil, errors.New("host: no DHT node")
 	}
+	names, services, err := buildServices(cfg)
+	if err != nil {
+		return nil, err
+	}
 	h := &Host{
 		log:           opts.Log,
 		dht:           opts.DHT,
@@ -124,14 +141,19 @@ func New(cfg *config.Config, appKey [32]byte, opts Options) (*Host, error) {
 		clock:         opts.Clock,
 		kinds:         opts.Kinds,
 		streamOptions: opts.streamOptions,
+		udpDial:       opts.udpDial,
 		limits:        cfg.Limits,
+		dir:           opts.Dir,
+		appKey:        appKey,
 		lan:           cfg.LAN.Enabled == nil || *cfg.LAN.Enabled,
 		lanPort:       uint64(cfg.LAN.Port),
-		services:      map[string]service{},
+		names:         names,
+		services:      services,
 		budget:        mux.NewBudget(uint64(cfg.Limits.ReceiveBudget)),
 		streams:       mux.NewCounter(cfg.Limits.StreamsTotal),
 		udp:           udpflow.NewCounter(cfg.Limits.UDPFlowsTotal),
 		conns:         map[*hyperdht.Conn]struct{}{},
+		links:         map[*link]struct{}{},
 	}
 	if h.log == nil {
 		h.log = slog.New(slog.DiscardHandler)
@@ -147,20 +169,27 @@ func New(cfg *config.Config, appKey [32]byte, opts Options) (*Host, error) {
 	copy(h.kp.Public[:], d.Host.Public().(ed25519.PublicKey))
 	copy(h.kp.Secret[:], d.Host)
 	copy(h.clientPub[:], d.Client.Public().(ed25519.PublicKey))
+	return h, nil
+}
 
-	// The names are sorted, so the handshake lists the services in the same order on every connection.
+// buildServices returns the service names of cfg, sorted, and the entry of each: the target the host dials and
+// its handshake entry. The names are sorted, so the handshake lists the services in the same order on every
+// connection.
+func buildServices(cfg *config.Config) ([]string, map[string]service, error) {
+	var names []string
 	for name := range cfg.Services {
-		h.names = append(h.names, name)
+		names = append(names, name)
 	}
-	sort.Strings(h.names)
-	for _, name := range h.names {
+	sort.Strings(names)
+	services := make(map[string]service, len(names))
+	for _, name := range names {
 		s := cfg.Services[name]
 		target, port, err := config.ParseTarget(s.Target)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		kind := kindOf(s.Kind)
-		h.services[name] = service{
+		services[name] = service{
 			addr:    net.JoinHostPort(target, strconv.Itoa(port)),
 			udp:     kind == protocol.KindUDP,
 			kind:    kind,
@@ -169,28 +198,89 @@ func New(cfg *config.Config, appKey [32]byte, opts Options) (*Host, error) {
 			idle:    time.Duration(s.Idle),
 		}
 	}
-	return h, nil
+	return names, services, nil
 }
 
-// handshake returns the services handshake a session's app is sent when its channel opens. A service's kind
-// is the one host.json names; a service with none takes the kind of the Kinds option, or unknown
-// (docs/architecture.md, Service kinds). The LAN block is there while the LAN route is on. It is built per
-// session, so a kind learned mid-session shows at the next session start.
+// handshake returns the services handshake a session's app is sent when its channel opens. The services are
+// servicesList; the LAN block is there while the LAN route is on. It is built per session, so a kind learned
+// mid-session shows at the next session start.
 func (h *Host) handshake() protocol.Handshake {
-	hs := protocol.Handshake{Version: protocolVersion, Flags: hostFlags}
+	hs := protocol.Handshake{Version: protocolVersion, Flags: hostFlags, Services: h.servicesList()}
+	if h.lan {
+		hs.Flags |= protocol.FlagLAN
+		hs.LAN = &protocol.LAN{Addresses: lanAddresses(), Port: h.lanPort}
+	}
+	return hs
+}
+
+// servicesList returns the services in handshake entries, in name order. A service with no kind takes the kind
+// of the Kinds option, or unknown (docs/architecture.md, Service kinds). A reload pushes this list to the open
+// sessions as message 8.
+func (h *Host) servicesList() []protocol.Service {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var list []protocol.Service
 	for _, name := range h.names {
 		s := h.services[name]
 		kind := s.kind
 		if kind == protocol.KindUnknown && h.kinds != nil {
 			kind = h.kinds(name)
 		}
-		hs.Services = append(hs.Services, protocol.Service{Name: name, Kind: kind, Port: s.port, Origins: s.origins})
+		list = append(list, protocol.Service{Name: name, Kind: kind, Port: s.port, Origins: s.origins})
 	}
-	if h.lan {
-		hs.Flags |= protocol.FlagLAN
-		hs.LAN = &protocol.LAN{Addresses: lanAddresses(), Port: h.lanPort}
+	return list
+}
+
+// udpServices returns the udp services, by name.
+func (h *Host) udpServices() map[string]service {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := map[string]service{}
+	for name, s := range h.services {
+		if s.udp {
+			out[name] = s
+		}
 	}
-	return hs
+	return out
+}
+
+// udpTarget resolves the target of a udp service for a new flow. A service that a reload removed, or that is no
+// longer udp, has none, so its new flows are dropped.
+func (h *Host) udpTarget(name string) (string, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s, ok := h.services[name]
+	return s.addr, ok && s.udp
+}
+
+// clientKey returns the one key the firewall admits now.
+func (h *Host) clientKey() [32]byte {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.clientPub
+}
+
+// addLink and removeLink register a session, so that a reload can push to it; liveLinks returns them all.
+func (h *Host) addLink(l *link) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.links[l] = struct{}{}
+}
+
+func (h *Host) removeLink(l *link) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.links, l)
+}
+
+func (h *Host) liveLinks() []*link {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]*link, 0, len(h.links))
+	for l := range h.links {
+		out = append(out, l)
+	}
+	return out
 }
 
 // kindOf maps a service kind of host.json to its wire kind. A service with no kind is unknown until kind
@@ -210,30 +300,77 @@ func kindOf(s string) protocol.Kind {
 }
 
 // Run listens on the DHT under the host key pair and serves sessions until ctx is done. It returns nil
-// when ctx is done and an error when the server cannot listen.
+// when ctx is done and an error when the server cannot listen. A reload that changes the key listens again
+// under the new one.
 func (h *Host) Run(ctx context.Context) error {
-	srv := h.dht.CreateServer(hyperdht.ServerOptions{Firewall: h.refuse, Keepalive: keepalive})
-	defer srv.Close()
-	if err := srv.Listen(ctx, h.kp); err != nil {
+	h.lifeMu.Lock()
+	h.ctx = ctx
+	h.mu.Lock()
+	kp, clientPub := h.kp, h.clientPub
+	h.mu.Unlock()
+	err := h.listen(ctx, kp, clientPub)
+	h.lifeMu.Unlock()
+	if err != nil {
 		if ctx.Err() != nil {
 			return nil
 		}
 		return fmt.Errorf("host: listen: %w", err)
 	}
-	stop := context.AfterFunc(ctx, func() { srv.Close() })
-	defer stop()
 	h.log.Info("listening")
 
+	<-ctx.Done()
+	h.lifeMu.Lock()
+	h.stop()
+	h.lifeMu.Unlock()
+	return nil
+}
+
+// listen listens under kp on a new server that admits clientPub, and makes it the server that serves. The server
+// it replaces is closed, and so are the sessions, which were admitted under the old key. When listen fails the
+// old server keeps serving. The caller holds lifeMu.
+func (h *Host) listen(ctx context.Context, kp noise.KeyPair, clientPub [32]byte) error {
+	srv := h.dht.CreateServer(hyperdht.ServerOptions{Firewall: h.firewall(clientPub), Keepalive: keepalive})
+	if err := srv.Listen(ctx, kp); err != nil {
+		srv.Close()
+		return err
+	}
+	h.mu.Lock()
+	old := h.srv
+	h.srv, h.kp, h.clientPub = srv, kp, clientPub
+	h.mu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+	h.closeAll()
+	go h.acceptLoop(srv)
+	return nil
+}
+
+// stop ends the listening: the server closes, and so do the sessions. Run calls it when its context is done.
+// The caller holds lifeMu.
+func (h *Host) stop() {
+	h.mu.Lock()
+	srv := h.srv
+	h.srv = nil
+	h.mu.Unlock()
+	if srv != nil {
+		srv.Close()
+	}
+	h.closeAll()
+}
+
+// acceptLoop serves the connections srv accepts, until srv closes. A connection that arrives once srv no longer
+// serves is destroyed: its key is no longer the one the host listens under.
+func (h *Host) acceptLoop(srv *hyperdht.Server) {
 	for {
 		conn, err := srv.Accept()
 		if err != nil {
-			h.closeAll()
-			if ctx.Err() != nil {
-				return nil
-			}
-			return fmt.Errorf("host: accept: %w", err)
+			return // srv closed: Run stopped, or a reload replaced it
 		}
-		h.track(conn)
+		if !h.trackServing(srv, conn) {
+			conn.Destroy()
+			return
+		}
 		if h.streamOptions != nil {
 			h.streamOptions(secretstream.Options{Keepalive: conn.Keepalive()})
 		}
@@ -245,12 +382,19 @@ func (h *Host) Run(ctx context.Context) error {
 	}
 }
 
-// refuse is the server's firewall. It refuses every key but the client key pair, and refuses that key once
-// it has SessionsPerKey live sessions (docs/architecture.md, Limits). A refused handshake gets no reply.
-func (h *Host) refuse(remote [32]byte, _ hyperdht.HandshakePayload) bool {
+// firewall returns the firewall of a server that admits clientPub.
+func (h *Host) firewall(clientPub [32]byte) func(remote [32]byte, _ hyperdht.HandshakePayload) bool {
+	return func(remote [32]byte, _ hyperdht.HandshakePayload) bool {
+		return h.refuse(clientPub, remote)
+	}
+}
+
+// refuse is the firewall for clientPub. It refuses every key but clientPub, and that key once it has
+// SessionsPerKey live sessions (docs/architecture.md, Limits). A refused handshake gets no reply.
+func (h *Host) refuse(clientPub, remote [32]byte) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if remote != h.clientPub {
+	if remote != clientPub {
 		return true
 	}
 	if len(h.conns) >= h.limits.SessionsPerKey {
@@ -265,7 +409,9 @@ func (h *Host) refuse(remote [32]byte, _ hyperdht.HandshakePayload) bool {
 // code 3 when the target refuses and code 4 when it does not answer in time. Reasons name no address and
 // no service (spec/ipc.md, rule 9).
 func (h *Host) accept(name string) mux.AcceptResult {
+	h.mu.Lock()
 	svc, ok := h.services[name]
+	h.mu.Unlock()
 	if !ok {
 		return mux.AcceptResult{Code: rejectUnknownService, Reason: "unknown service"}
 	}
@@ -286,13 +432,32 @@ func (h *Host) accept(name string) mux.AcceptResult {
 	return mux.AcceptResult{Target: func(st *mux.Stream) { forward(st, conn, svc.idle) }}
 }
 
-// track and untrack record the live connections; closeAll ends them when Run returns.
-func (h *Host) track(c *hyperdht.Conn) {
+// trackServing records c as a live connection when srv is still the server that serves. It reports false when
+// srv is no longer serving, and then records nothing.
+func (h *Host) trackServing(srv *hyperdht.Server, c *hyperdht.Conn) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.srv != srv {
+		return false
+	}
 	h.conns[c] = struct{}{}
+	return true
 }
 
+// trackAdmitted records s, a LAN stream, as a live connection when its key is the one the host admits now, in the
+// same step as the check, so that a reload which changes the key cannot miss it. It reports false otherwise.
+func (h *Host) trackAdmitted(s *hyperdht.Conn) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if s.RemotePublicKey() != h.clientPub {
+		return false
+	}
+	h.conns[s] = struct{}{}
+	return true
+}
+
+// untrack forgets a connection that ended. closeAll ends the live connections when the host stops listening
+// under a key.
 func (h *Host) untrack(c *hyperdht.Conn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

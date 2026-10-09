@@ -47,5 +47,6 @@ app.*.map.json
 # Widget Preview related
 .widget_preview/
 
-# The engine bundle copy, made by tool/copy_engine_bundle.sh
+# The engine bundle and native addon copies, made by tool/copy_engine_bundle.sh
 /assets/engine.bundle
+/assets/engine_addons/

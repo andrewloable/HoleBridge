@@ -48,6 +48,10 @@ const cmdPeerHolepunch = 1
 // Pauses of the punch loops that punchTiming does not set (lib/holepuncher.js).
 const keepAliveWait = 100 * time.Millisecond
 
+// errPunchGated is what punch returns when a randomized punch may not begin yet: the DHT's gate on randomized punches
+// is at its limit, or the interval after the last one has not passed. No datagram is sent.
+var errPunchGated = errors.New("hyperdht: randomized punches are at their limit")
+
 // ErrHolepunchDoubleRandomized is upstream's HOLEPUNCH_DOUBLE_RANDOMIZED_NATS: both the local and the remote NAT
 // randomize their ports, so no punch is tried. punch returns it without sending a datagram.
 var ErrHolepunchDoubleRandomized = errors.New("hyperdht: both remote and local NATs are randomized")
@@ -69,6 +73,71 @@ type punchSocket interface {
 type punchPool interface {
 	Acquire() punchSocket
 	Release(punchSocket)
+}
+
+// holepunchTryLater is ERROR.TRY_LATER (lib/constants.js): the peer asks the punch to wait while randomized punches run.
+const holepunchTryLater uint64 = 3
+
+// randomGate is the DHT's limit on randomized punches (upstream dht._randomPunchLimit, _randomPunchInterval,
+// _randomPunches and _lastRandomPunch). begin counts a randomized punch that starts, and reports false while the
+// limit is in use or the interval after the last one has not passed; end counts it down and stamps its end. A nil
+// gate never refuses. mu guards the counters.
+type randomGate struct {
+	limit    int           // randomized punches that may run at once: 1
+	interval time.Duration // the wait after the last one ended before the next may start: 20 s
+	mu       sync.Mutex
+	running  int       // randomized punches running (upstream _randomPunches)
+	last     time.Time // when the last one ended (upstream _lastRandomPunch)
+}
+
+// ready reports whether a randomized punch could begin at now, without counting one.
+func (g *randomGate) ready(now time.Time) bool {
+	if g == nil {
+		return true
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.running < g.limit && now.Sub(g.last) >= g.interval
+}
+
+// begin counts a randomized punch that starts at now, and reports whether it may start.
+func (g *randomGate) begin(now time.Time) bool {
+	if g == nil {
+		return true
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.running >= g.limit || now.Sub(g.last) < g.interval {
+		return false
+	}
+	g.running++
+	return true
+}
+
+// end counts down a randomized punch that ended at now.
+func (g *randomGate) end(now time.Time) {
+	if g == nil {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.running > 0 {
+		g.running--
+	}
+	g.last = now
+}
+
+// sampledFrom reports whether the puncher has taken a NAT sample from the observer from.
+func (p *holepuncher) sampledFrom(from Address) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.nat.visited[from]
+}
+
+// birthdayPool is a punch pool that also hands out sockets of its own, each with its own NAT mapping, for the birthday
+// punch (upstream openBirthdaySockets). A pool without it gives the birthday punch the sockets of Acquire.
+type birthdayPool interface {
+	AcquireBirthday() (punchSocket, error)
 }
 
 // punchTiming sets the loops of the punch state machine. A zero field takes upstream's value.
@@ -115,19 +184,27 @@ type punchConfig struct {
 	RemoteFirewall uint64
 	OnConnect      func(sock punchSocket, remote *net.UDPAddr)
 	OnAbort        func()
-	Timing         punchTiming
+	// OnPunchFrom is called once on a responder, when a holepunch datagram arrives from one of the peer's
+	// addresses. A server claims the stream of its handshake there. It is never called on an initiator.
+	OnPunchFrom func(sock punchSocket, remote *net.UDPAddr)
+	// Gate is the DHT's limit on randomized punches. A randomized punch counts against it from the moment it begins
+	// until it connects or is destroyed. Nil means no limit.
+	Gate   *randomGate
+	Timing punchTiming
 }
 
 // holepuncher is the punch state of one connect or one handshake (lib/holepuncher.js): the sockets it punches
 // from, its NAT samples, and what the peer reported. Its probe loops run in the background, and stop when it is
 // destroyed or connects. mu guards every field below it.
 type holepuncher struct {
-	pool      punchPool
-	initiator bool
-	timing    punchTiming
-	onConnect func(sock punchSocket, remote *net.UDPAddr)
-	onAbort   func()
-	stop      chan struct{} // closed by destroy, which ends the pauses
+	pool        punchPool
+	initiator   bool
+	timing      punchTiming
+	onConnect   func(sock punchSocket, remote *net.UDPAddr)
+	onAbort     func()
+	onPunchFrom func(sock punchSocket, remote *net.UDPAddr)
+	gate        *randomGate   // the DHT's limit on randomized punches, or nil
+	stop        chan struct{} // closed by destroy, which ends the pauses
 
 	mu                 sync.Mutex
 	holders            []punchSocket // holders[0] is the socket probes go out from; the connected one, once connected
@@ -138,6 +215,8 @@ type holepuncher struct {
 	punching           bool
 	isConnected        bool
 	isDestroyed        bool
+	heard              bool // a responder has called onPunchFrom
+	gated              bool // this puncher counts against the gate: a randomized punch has begun and not ended
 }
 
 // remoteAddress is an address the peer reported, and whether it is verified: the peer echoed the token of its host.
@@ -154,6 +233,8 @@ func newHolepuncher(cfg punchConfig) *holepuncher {
 		timing:         cfg.Timing.withDefaults(),
 		onConnect:      cfg.OnConnect,
 		onAbort:        cfg.OnAbort,
+		onPunchFrom:    cfg.OnPunchFrom,
+		gate:           cfg.Gate,
 		stop:           make(chan struct{}),
 		remoteFirewall: cfg.RemoteFirewall,
 	}
@@ -168,13 +249,13 @@ func newHolepuncher(cfg punchConfig) *holepuncher {
 }
 
 // adoptHolder makes sock one of the puncher's holders and routes the holepunch datagrams it receives to the puncher.
-// A destroyed puncher releases the socket instead, and returns false.
+// A destroyed or connected puncher releases the socket instead, and returns false.
 func (p *holepuncher) adoptHolder(sock punchSocket) bool {
 	sock.OnPunch(func(from *net.UDPAddr) { p.onPunchMessage(sock, from) })
 	p.mu.Lock()
-	if p.isDestroyed {
+	if p.isDestroyed || p.isConnected {
 		p.mu.Unlock()
-		p.pool.Release(sock)
+		p.pool.Release(sock) // a puncher that has connected keeps no more sockets
 		return false
 	}
 	p.holders = append(p.holders, sock)
@@ -196,6 +277,17 @@ func (p *holepuncher) updateRemote(firewall uint64, punching bool, addresses []A
 	p.remoteFirewall = firewall
 	p.remoteAddresses = next
 	p.remoteHolepunching = punching
+}
+
+// isRemoteLocked reports whether addr is one of the peer's addresses: its host, and its port when the peer gave
+// one (a randomizing peer gives its host only). The caller holds mu.
+func (p *holepuncher) isRemoteLocked(addr Address) bool {
+	for _, a := range p.remoteAddresses {
+		if a.addr.Host == addr.Host && (a.addr.Port == 0 || a.addr.Port == addr.Port) {
+			return true
+		}
+	}
+	return false
 }
 
 // isVerifiedLocked reports whether host is a verified remote address. The caller holds mu.
@@ -235,14 +327,46 @@ func (p *holepuncher) natAddresses() []Address {
 	return append([]Address(nil), p.nat.addrs...)
 }
 
-// punch starts the punch for the firewall states of both sides, and returns whether a punch was started. It
-// returns ErrHolepunchDoubleRandomized, with no datagram sent, when both NATs randomize. The probe loops run in
-// the background, and end when the puncher connects or is destroyed.
+// firewalls returns the peer's firewall state as the puncher has it, the puncher's own NAT state, and whether the
+// peer is punching.
+func (p *holepuncher) firewalls() (remote, local uint64, remotePunching bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.remoteFirewall, p.nat.firewall, p.remoteHolepunching
+}
+
+// probeSocket returns the socket that probes go out from, or nil once the puncher has none.
+func (p *holepuncher) probeSocket() punchSocket {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.holders) == 0 {
+		return nil
+	}
+	return p.holders[0]
+}
+
+// openSession sends a low-TTL datagram to addr from the probe socket. It opens a mapping on the local NAT and
+// dies before the peer (upstream holepuncher openSession).
+func (p *holepuncher) openSession(addr Address) {
+	if sock := p.probeSocket(); sock != nil {
+		sendHolepunch(sock, addr, true)
+	}
+}
+
+// punch starts the punch for the firewall states of both sides, and returns whether a punch is running: a punch
+// that runs already is left as it is, so a repeated call returns true. It returns ErrHolepunchDoubleRandomized,
+// with no datagram sent, when both NATs randomize. The probe loops run in the background, and end when the
+// puncher connects or is destroyed.
 func (p *holepuncher) punch() (bool, error) {
 	p.mu.Lock()
 	if p.isDestroyed || p.isConnected {
 		p.mu.Unlock()
 		return false, nil
+	}
+	if p.punching {
+		// A punch that runs already answers for the peer's probes (upstream punch returns the running one).
+		p.mu.Unlock()
+		return true, nil
 	}
 	if p.remoteFirewall >= firewallRandom && p.nat.firewall >= firewallRandom {
 		p.mu.Unlock()
@@ -268,6 +392,10 @@ func (p *holepuncher) punch() (bool, error) {
 	}
 	switch {
 	case local == firewallConsistent && remote >= firewallRandom:
+		if !p.beginRandomLocked() {
+			p.mu.Unlock()
+			return false, errPunchGated
+		}
 		p.punching = true
 		sock := p.holders[0]
 		p.mu.Unlock()
@@ -276,6 +404,10 @@ func (p *holepuncher) punch() (bool, error) {
 		go p.randomProbes(sock, verified.addr.Host, p.timing.RandomProbes-1)
 		return true, nil
 	case local >= firewallRandom && remote == firewallConsistent:
+		if !p.beginRandomLocked() {
+			p.mu.Unlock()
+			return false, errPunchGated
+		}
 		p.punching = true
 		p.mu.Unlock()
 		go p.birthdayProbes(verified.addr)
@@ -283,6 +415,26 @@ func (p *holepuncher) punch() (bool, error) {
 	}
 	p.mu.Unlock()
 	return false, nil
+}
+
+// beginRandomLocked counts a randomized punch against the gate, and reports whether it may begin. The caller holds mu.
+func (p *holepuncher) beginRandomLocked() bool {
+	if p.gate == nil {
+		return true
+	}
+	if !p.gate.begin(time.Now()) {
+		return false
+	}
+	p.gated = true
+	return true
+}
+
+// endRandomLocked counts this puncher's randomized punch off the gate, once, when it ends at now. The caller holds mu.
+func (p *holepuncher) endRandomLocked(now time.Time) {
+	if p.gated {
+		p.gated = false
+		p.gate.end(now)
+	}
 }
 
 // verifiedAddressLocked returns the first verified remote address. The caller holds mu.
@@ -355,12 +507,24 @@ func (p *holepuncher) birthdayProbes(remote Address) {
 // datagram to remote, which opens its mapping on the local NAT without reaching the peer.
 func (p *holepuncher) openBirthdaySockets(remote Address) {
 	for p.isPunching() && p.holderCount() < p.timing.BirthdaySockets {
-		sock := p.pool.Acquire()
+		sock, err := p.acquireBirthday()
+		if err != nil {
+			return
+		}
 		if !p.adoptHolder(sock) {
 			return
 		}
 		sendHolepunch(sock, remote, true)
 	}
+}
+
+// acquireBirthday returns a socket for the birthday punch: a socket of its own when the pool has them (birthdayPool),
+// else the pool's next socket.
+func (p *holepuncher) acquireBirthday() (punchSocket, error) {
+	if bp, ok := p.pool.(birthdayPool); ok {
+		return bp.AcquireBirthday()
+	}
+	return p.pool.Acquire(), nil
 }
 
 // keepAliveRandomNat keeps the birthday mappings open. Each holder sends to remote, the first pass with the low
@@ -403,23 +567,41 @@ func (p *holepuncher) holderSockets() []punchSocket {
 
 // onPunchMessage handles a holepunch datagram that arrived on sock from from. A responder answers it, so the peer
 // can connect; the initiator connects on the first one, and releases the other sockets.
+//
+// The node's socket is shared, so a datagram can come from any address. An initiator connects only on a datagram
+// from an address the peer named, and a responder answers and calls onPunchFrom only for one.
 func (p *holepuncher) onPunchMessage(sock punchSocket, from *net.UDPAddr) {
+	addr := addressOf(from)
 	p.mu.Lock()
 	if p.isDestroyed {
 		p.mu.Unlock()
 		return
 	}
 	if !p.initiator {
+		// A responder answers only a datagram from an address its peer named. The node's socket is shared by every live
+		// responder, so answering each datagram would multiply it by the number of live handshakes; upstream's responder
+		// answers what its own socket receives, which only its peer's datagrams reach.
+		named := p.isRemoteLocked(addr)
+		fire := p.onPunchFrom != nil && !p.heard && named
+		if fire {
+			p.heard = true
+		}
 		p.mu.Unlock()
-		sendHolepunch(sock, addressOf(from), false) // never fails
+		if fire {
+			p.onPunchFrom(sock, from)
+		}
+		if named {
+			sendHolepunch(sock, addr, false) // never fails
+		}
 		return
 	}
-	if p.isConnected {
+	if p.isConnected || !p.isRemoteLocked(addr) {
 		p.mu.Unlock()
 		return
 	}
 	p.isConnected = true
 	p.punching = false
+	p.endRandomLocked(time.Now())
 	var others []punchSocket
 	for _, h := range p.holders {
 		if h != sock {
@@ -459,6 +641,7 @@ func (p *holepuncher) destroy() {
 	}
 	p.isDestroyed = true
 	p.punching = false
+	p.endRandomLocked(time.Now())
 	close(p.stop)
 	connected := p.isConnected
 	holders := p.holders

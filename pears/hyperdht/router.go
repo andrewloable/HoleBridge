@@ -274,11 +274,19 @@ func (d *DHT) onPeerHolepunch(req *dhtrpc.Request) *dhtrpc.Response {
 		if !ok || rt.serve == nil || hp.PeerAddress == nil {
 			return nil
 		}
-		reply := rt.serve.answerHolepunch(hp.ID, hp.Payload, udpAddrOf(*hp.PeerAddress), req.From)
-		if reply == nil {
-			return nil
+		// The relay saw this server at the address the probe names, so the probe is a NAT sample from that relay.
+		if req.To.Host.IsValid() && req.From != nil {
+			rt.serve.observeProbe(hp.ID, Address{Host: req.To.Host, Port: req.To.Port}, addressOf(req.From))
 		}
-		d.relayHolepunch(req, req.From, Holepunch{Mode: holepunchFromServer, Payload: reply, PeerAddress: hp.PeerAddress})
+		// The answer can wait for the puncher's NAT samples, so it is made off the read loop, and sent back through
+		// the relay when it is made (as the handshake decision is).
+		go func() {
+			reply := rt.serve.answerHolepunch(hp.ID, hp.Payload, udpAddrOf(*hp.PeerAddress), req.From)
+			if reply == nil {
+				return
+			}
+			d.relayHolepunch(req, req.From, Holepunch{Mode: holepunchFromServer, Payload: reply, PeerAddress: hp.PeerAddress})
+		}()
 	case holepunchFromServer:
 		if hp.PeerAddress == nil {
 			return nil

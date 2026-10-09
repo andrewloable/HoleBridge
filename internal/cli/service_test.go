@@ -2,15 +2,19 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/andrewloable/HoleBridge/internal/config"
+	"github.com/andrewloable/HoleBridge/internal/status"
 )
 
 // restartNote is printed by service add and rm while host.lock names a running host.
@@ -63,6 +67,57 @@ func writeHostLock(t *testing.T, dir string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, "host.lock"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// appliedLine is printed by service add and rm when the running host reloads host.json.
+const appliedLine = "change applied to the running host"
+
+// reloadHandler is the control socket of a running host in the tests: its reload succeeds, and it counts the
+// reload requests.
+type reloadHandler struct {
+	reloads atomic.Int32
+}
+
+func (h *reloadHandler) Status() status.Status { return status.Status{} }
+
+func (h *reloadHandler) Reload() error {
+	h.reloads.Add(1)
+	return nil
+}
+
+// controlDir returns a new directory for a config whose control socket is served there. A Unix socket path is
+// limited to about 104 bytes on macOS, which a t.TempDir path can exceed.
+func controlDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "hb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
+// serveControl serves the control socket in dir with h until the test ends, and returns once it answers a
+// status request.
+func serveControl(t *testing.T, dir string, h status.Handler) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() { served <- status.Serve(ctx, dir, h) }()
+	t.Cleanup(func() {
+		cancel()
+		<-served
+	})
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := status.Query(dir, "status"); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the control socket did not answer a status request")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -258,11 +313,57 @@ func TestServiceLsPrintsKindOrDetecting(t *testing.T) {
 	}
 }
 
-// Case 8: while host.lock in the config directory names a live process, add and rm print the
-// restart note on stdout. Without host.lock, add prints no note. host.lock holds the process ID in
-// decimal (the format is chosen by HoleBridge-trk.3; the host command must write the same).
+// Case 8: while host.lock in the config directory names a live process, add and rm ask the host to reload
+// over the control socket. When the host reloads, they print that the change was applied and no restart
+// note. When the reload cannot be asked, they print the restart note. Without host.lock, add prints no note.
+// host.lock holds the process ID in decimal (the format is chosen by HoleBridge-trk.3; the host command must
+// write the same).
 func TestServiceAddAndRmPrintRestartNoteWhileHostRuns(t *testing.T) {
-	t.Run("add prints the note", func(t *testing.T) {
+	t.Run("add reloads the running host", func(t *testing.T) {
+		dir := controlDir(t)
+		writeHostJSON(t, dir, existingHostJSON)
+		writeHostLock(t, dir)
+		handler := &reloadHandler{}
+		serveControl(t, dir, handler)
+
+		code, stdout, stderr := run("--config", dir, "service", "add", "jellyfin", "8096")
+		if code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, stderr)
+		}
+		if n := handler.reloads.Load(); n != 1 {
+			t.Errorf("the control socket got %d reload requests, want 1", n)
+		}
+		if !strings.Contains(stdout, appliedLine) {
+			t.Errorf("stdout does not contain %q: %q", appliedLine, stdout)
+		}
+		if strings.Contains(stdout, restartNote) {
+			t.Errorf("stdout contains the restart note after a reload: %q", stdout)
+		}
+	})
+
+	t.Run("rm reloads the running host", func(t *testing.T) {
+		dir := controlDir(t)
+		writeHostJSON(t, dir, existingHostJSON)
+		writeHostLock(t, dir)
+		handler := &reloadHandler{}
+		serveControl(t, dir, handler)
+
+		code, stdout, stderr := run("--config", dir, "service", "rm", "web")
+		if code != 0 {
+			t.Fatalf("exit code = %d, want 0 (stderr %q)", code, stderr)
+		}
+		if n := handler.reloads.Load(); n != 1 {
+			t.Errorf("the control socket got %d reload requests, want 1", n)
+		}
+		if !strings.Contains(stdout, appliedLine) {
+			t.Errorf("stdout does not contain %q: %q", appliedLine, stdout)
+		}
+		if strings.Contains(stdout, restartNote) {
+			t.Errorf("stdout contains the restart note after a reload: %q", stdout)
+		}
+	})
+
+	t.Run("add prints the note when the reload cannot be asked", func(t *testing.T) {
 		dir := t.TempDir()
 		writeHostJSON(t, dir, existingHostJSON)
 		writeHostLock(t, dir)
@@ -276,7 +377,7 @@ func TestServiceAddAndRmPrintRestartNoteWhileHostRuns(t *testing.T) {
 		}
 	})
 
-	t.Run("rm prints the note", func(t *testing.T) {
+	t.Run("rm prints the note when the reload cannot be asked", func(t *testing.T) {
 		dir := t.TempDir()
 		writeHostJSON(t, dir, existingHostJSON)
 		writeHostLock(t, dir)

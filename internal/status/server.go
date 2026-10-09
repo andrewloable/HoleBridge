@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sync"
+	"time"
 
 	"github.com/andrewloable/HoleBridge/pears/dhtrpc"
 )
@@ -26,6 +28,24 @@ var errAlreadyServing = errors.New("status: a control socket already serves this
 type listener interface {
 	Accept() (io.ReadWriteCloser, error)
 	Close() error
+}
+
+// deadlines bound one connection: the request line must arrive within request of the connection's start, and the
+// answer must be taken within answer of the start of the write.
+type deadlines struct {
+	request time.Duration
+	answer  time.Duration
+}
+
+// defaultDeadlines are the deadlines Serve uses. A request takes milliseconds, so a few seconds is generous.
+var defaultDeadlines = deadlines{request: 5 * time.Second, answer: 5 * time.Second}
+
+// deadliner is a connection that takes deadlines: Unix socket connections do. On Windows a named pipe handle
+// returns an error from these calls, so its reads and writes have no deadline there. Serve still stops such a
+// connection's handler calls, and it closes the handle, but a read that is already blocked may stay blocked.
+type deadliner interface {
+	SetReadDeadline(time.Time) error
+	SetWriteDeadline(time.Time) error
 }
 
 // Handler answers the control socket. Status returns the snapshot that a status request reports. Reload is run
@@ -76,12 +96,20 @@ type errorAnswer struct {
 }
 
 // Serve listens on the control socket in dir and answers requests with h until ctx is done. It returns nil when
-// ctx ends, and an error when it cannot listen, for example because another Serve already listens in dir.
+// ctx ends, and an error when it cannot listen, for example because another Serve already listens in dir. When it
+// returns, its connections have been closed and no handler call is running or will start.
 func Serve(ctx context.Context, dir string, h Handler) error {
+	return serve(ctx, dir, h, defaultDeadlines)
+}
+
+// serve is Serve with the deadlines given, so the tests can use short ones.
+func serve(ctx context.Context, dir string, h Handler, d deadlines) error {
 	ln, err := listen(dir)
 	if err != nil {
 		return err
 	}
+	s := &server{h: h, deadlines: d, conns: map[io.ReadWriteCloser]struct{}{}}
+	defer s.shutdown()
 	defer ln.Close()
 	stop := make(chan struct{})
 	defer close(stop)
@@ -100,35 +128,101 @@ func Serve(ctx context.Context, dir string, h Handler) error {
 			}
 			return err
 		}
-		go serveConn(conn, h)
+		s.track(conn)
+		go s.serveConn(conn)
 	}
 }
 
-// serveConn reads one request line from conn, writes one answer line and closes conn.
-func serveConn(conn io.ReadWriteCloser, h Handler) {
+// server is the state of one Serve: its live connections, so that Serve can close them, and the handler calls in
+// progress, so that Serve can wait for them.
+type server struct {
+	h         Handler
+	deadlines deadlines
+	mu        sync.Mutex
+	conns     map[io.ReadWriteCloser]struct{}
+	stopped   bool
+	calls     sync.WaitGroup
+}
+
+func (s *server) track(conn io.ReadWriteCloser) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.conns[conn] = struct{}{}
+}
+
+func (s *server) untrack(conn io.ReadWriteCloser) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.conns, conn)
+}
+
+// startCall reports whether a handler call may start. Once shutdown has begun it returns false, so a request read
+// just before the stop is not run. A true return must be followed by calls.Done.
+func (s *server) startCall() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		return false
+	}
+	s.calls.Add(1)
+	return true
+}
+
+// shutdown stops new handler calls, closes the live connections, and waits for the calls in progress.
+func (s *server) shutdown() {
+	s.mu.Lock()
+	s.stopped = true
+	for conn := range s.conns {
+		conn.Close()
+	}
+	s.mu.Unlock()
+	s.calls.Wait()
+}
+
+// serveConn reads one request line from conn, writes one answer line and closes conn. The request line and the
+// answer each have a deadline, so a client that goes quiet does not hold the connection.
+func (s *server) serveConn(conn io.ReadWriteCloser) {
+	defer s.untrack(conn)
 	defer conn.Close()
+	if d, ok := conn.(deadliner); ok {
+		_ = d.SetReadDeadline(time.Now().Add(s.deadlines.request))
+	}
 	line, _ := bufio.NewReader(io.LimitReader(conn, maxRequest)).ReadBytes('\n')
 	if len(line) == 0 {
 		return
 	}
-	var ans any = errorAnswer{Error: "bad request"}
-	var req request
-	if json.Unmarshal(line, &req) == nil {
-		switch req.Cmd {
-		case "status":
-			ans = h.Status()
-		case "reload":
-			ans = reloadAnswer{OK: true}
-			if err := h.Reload(); err != nil {
-				ans = reloadAnswer{Error: err.Error()}
-			}
-		default:
-			ans = errorAnswer{Error: "unknown command"}
-		}
+	ans, ok := s.answer(line)
+	if !ok {
+		return
 	}
 	out, err := json.Marshal(ans)
 	if err != nil {
 		return
 	}
+	if d, ok := conn.(deadliner); ok {
+		_ = d.SetWriteDeadline(time.Now().Add(s.deadlines.answer))
+	}
 	_, _ = conn.Write(append(out, '\n'))
+}
+
+// answer returns the answer to the request in line. It reports false, and runs nothing, once shutdown has begun.
+func (s *server) answer(line []byte) (any, bool) {
+	var req request
+	if json.Unmarshal(line, &req) != nil {
+		return errorAnswer{Error: "bad request"}, true
+	}
+	if req.Cmd != "status" && req.Cmd != "reload" {
+		return errorAnswer{Error: "unknown command"}, true
+	}
+	if !s.startCall() {
+		return nil, false
+	}
+	defer s.calls.Done()
+	if req.Cmd == "status" {
+		return s.h.Status(), true
+	}
+	if err := s.h.Reload(); err != nil {
+		return reloadAnswer{Error: err.Error()}, true
+	}
+	return reloadAnswer{OK: true}, true
 }

@@ -256,9 +256,34 @@ func (s *Stream) Read(p []byte) (int, error) {
 	if s.dec == nil {
 		return 0, errNotConnected
 	}
+	if err := s.fill(); err != nil {
+		return 0, err
+	}
+	n := copy(p, s.pending)
+	s.pending = s.pending[n:]
+	return n, nil
+}
+
+// ReadFrame returns the next message's plaintext whole, as the peer wrote it, so a caller that reads frames needs
+// no buffer of its own. Any data a Read left pending is returned first. It returns io.EOF after the peer closes and
+// the pending data is read. Keepalive messages are skipped.
+func (s *Stream) ReadFrame() ([]byte, error) {
+	if s.dec == nil {
+		return nil, errNotConnected
+	}
+	if err := s.fill(); err != nil {
+		return nil, err
+	}
+	p := s.pending
+	s.pending = nil
+	return p, nil
+}
+
+// fill reads messages until pending holds data, or a read fails. The first read error repeats.
+func (s *Stream) fill() error {
 	for len(s.pending) == 0 {
 		if s.rerr != nil {
-			return 0, s.rerr
+			return s.rerr
 		}
 		if s.rerr = s.readMessage(); s.rerr != nil {
 			s.readEnded.Store(true)
@@ -267,9 +292,7 @@ func (s *Stream) Read(p []byte) (int, error) {
 			}
 		}
 	}
-	n := copy(p, s.pending)
-	s.pending = s.pending[n:]
-	return n, nil
+	return nil
 }
 
 // readMessage reads the next frame and opens it into pending. An empty message is a keepalive.

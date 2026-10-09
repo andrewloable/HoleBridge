@@ -118,14 +118,17 @@ func TestStatusListsServicesAndSessions(t *testing.T) {
 	}
 }
 
-// Case 2: with no control socket answering, status prints "holebridge is not running" on stderr and
-// exits 1. Nothing goes to stdout.
+// Case 2: with no control socket answering, status prints HB-NOT-RUNNING and "holebridge is not running" on
+// stderr and exits 1. Nothing goes to stdout.
 func TestStatusWithNoServerSaysNotRunningAndExitsOne(t *testing.T) {
 	dir := shortDir(t)
 
 	code, stdout, stderr := run("--config", dir, "status")
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1 (stderr %q)", code, stderr)
+	}
+	if !strings.Contains(stderr, "HB-NOT-RUNNING") {
+		t.Errorf("stderr does not carry HB-NOT-RUNNING: %q", stderr)
 	}
 	if !strings.Contains(stderr, "holebridge is not running") {
 		t.Errorf("stderr does not say holebridge is not running: %q", stderr)

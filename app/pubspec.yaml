@@ -67,9 +67,11 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
-  # The engine bundle, copied here by tool/copy_engine_bundle.sh (git-ignored).
+  # The engine bundle and its native addons, copied here by tool/copy_engine_bundle.sh
+  # (git-ignored).
   assets:
     - assets/engine.bundle
+    - assets/engine_addons/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

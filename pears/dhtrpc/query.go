@@ -296,7 +296,7 @@ func (q *Query) onAnswer(a answer) {
 	}
 	for _, c := range m.CloserNodes {
 		addr := &net.UDPAddr{IP: net.IP(c.Host.AsSlice()), Port: int(c.Port)}
-		if nodeID(addr) == q.n.id {
+		if nodeID(addr) == q.n.tableID() {
 			continue
 		}
 		if !q.add(addr, a.addr) {

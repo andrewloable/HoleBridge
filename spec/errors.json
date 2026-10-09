@@ -25,6 +25,14 @@
       "where": ["go"]
     },
     {
+      "code": "HB-CONFIG-DIR-PERMS",
+      "title": "Config directory not owner-only",
+      "problem": "the config directory is not owner-only",
+      "cause": "The control socket lives in the config directory. The host and the relay do not serve while other users can enter it, or while another user owns it.",
+      "fix": "chmod 700 ~/.config/holebridge",
+      "where": ["go"]
+    },
+    {
       "code": "HB-CONFIG-INVALID",
       "title": "Config is not valid",
       "problem": "the configuration is not valid",
@@ -46,6 +54,14 @@
       "problem": "the pairing code timed out",
       "cause": "A pairing code works for 5 minutes, so an old code is not accepted.",
       "fix": "On the TV, choose Add from phone again to show a new code.",
+      "where": ["app"]
+    },
+    {
+      "code": "HB-HANDOFF-REFUSED",
+      "title": "TV refused the host",
+      "problem": "the TV did not accept the host",
+      "cause": "A TV accepts a host only from a phone that scanned the code it is showing now. The code on the phone is old, or it came from another TV.",
+      "fix": "On the TV, choose Add from phone to show a new code, then scan that code with the phone.",
       "where": ["app"]
     },
     {
@@ -95,6 +111,30 @@
       "cause": "No host answered for this key. The host may be off, the key may be mistyped or from another deployment, or the network may block the connection.",
       "fix": "Check that the host is running and that the key is right. The app keeps trying on its own.",
       "where": ["app"]
+    },
+    {
+      "code": "HB-NOT-RUNNING",
+      "title": "Not running",
+      "problem": "holebridge is not running",
+      "cause": "holebridge status reads the control socket of a running host or relay in this config directory. No socket answers, so none is running here.",
+      "fix": "Start one with holebridge host or holebridge relay, or pass --config for the directory of the one that runs.",
+      "where": ["go"]
+    },
+    {
+      "code": "HB-RELAY-KEY-MISSING",
+      "title": "No relay key",
+      "problem": "there is no relay key in the config directory",
+      "cause": "A relay runs under the relay key in relay.key. The hosts and apps that use the relay need the same key.",
+      "fix": "Run holebridge relay --new-key to create relay.key, then put the same key in host.json (relay) and in the app under Settings, Relay.",
+      "where": ["go"]
+    },
+    {
+      "code": "HB-RELAY-KEY-PERMS",
+      "title": "relay.key readable by others",
+      "problem": "relay.key can be read by other users",
+      "cause": "The file holds the relay key, and anyone who has it can use the relay. The relay and relay check do not run while others can read it.",
+      "fix": "chmod 600 ~/.config/holebridge/relay.key, or the file given to relay check",
+      "where": ["go"]
     },
     {
       "code": "HB-RELAY-REFUSED",

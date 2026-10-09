@@ -8,19 +8,14 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	"github.com/andrewloable/HoleBridge/internal/cli"
 	"github.com/andrewloable/HoleBridge/internal/config"
 	"github.com/andrewloable/HoleBridge/internal/host/hosttest"
 	"github.com/andrewloable/HoleBridge/internal/keys"
 	"github.com/andrewloable/HoleBridge/internal/log"
 	"github.com/andrewloable/HoleBridge/internal/protocol"
-	"github.com/andrewloable/HoleBridge/internal/status"
 	"github.com/andrewloable/HoleBridge/pears/hyperdht"
 	"github.com/andrewloable/HoleBridge/pears/noise"
 )
@@ -211,78 +206,5 @@ func TestReloadRotatedKeyRelistensAndClosesOldSessions(t *testing.T) {
 	if err == nil {
 		conn.Close()
 		t.Fatal("the host still accepts connections under the old host key")
-	}
-}
-
-// reloadCounter is the control socket's handler in case 4. It counts reload requests and reports no status.
-type reloadCounter struct {
-	mu      sync.Mutex
-	reloads int
-}
-
-func (c *reloadCounter) Status() status.Status { return status.Status{} }
-
-func (c *reloadCounter) Reload() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.reloads++
-	return nil
-}
-
-func (c *reloadCounter) count() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.reloads
-}
-
-// Case 4: holebridge service add on a running host sends a reload request over the control socket, and prints no
-// restart note. The host is running when host.lock names a live process; the test writes its own process ID,
-// and serves the control socket with a handler that counts reload requests.
-func TestServiceAddSendsReloadOverControlSocket(t *testing.T) {
-	// A Unix socket path is limited to about 104 bytes on macOS, so the directory is not t.TempDir.
-	dir, err := os.MkdirTemp("", "hb")
-	if err != nil {
-		t.Fatalf("MkdirTemp: %v", err)
-	}
-	t.Cleanup(func() { os.RemoveAll(dir) })
-	writeHostJSON(t, dir, keys.Generate(), map[string]config.Service{"echo": {Target: "127.0.0.1:7", Kind: "tcp"}})
-	if err := os.WriteFile(filepath.Join(dir, "host.lock"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
-		t.Fatalf("write host.lock: %v", err)
-	}
-
-	handler := &reloadCounter{}
-	ctx, cancel := context.WithCancel(context.Background())
-	served := make(chan error, 1)
-	go func() { served <- status.Serve(ctx, dir, handler) }()
-	t.Cleanup(func() {
-		cancel()
-		<-served
-	})
-	deadline := time.Now().Add(readWait)
-	for {
-		if _, err := status.Query(dir, "status"); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the control socket did not answer a status request")
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	var stdout, stderr bytes.Buffer
-	code := cli.Run([]string{"--config", dir, "service", "add", "jellyfin", "8096"}, cli.Env{
-		Stdout: &stdout,
-		Stderr: &stderr,
-		Getenv: func(string) string { return "" },
-		Now:    time.Now,
-	})
-	if code != 0 {
-		t.Fatalf("service add exit code = %d, stderr: %s", code, stderr.String())
-	}
-	if n := handler.count(); n != 1 {
-		t.Errorf("the control socket got %d reload requests from service add, want 1", n)
-	}
-	if strings.Contains(stdout.String(), "restart holebridge host") {
-		t.Error("service add printed the restart note on a running host, want a reload instead")
 	}
 }

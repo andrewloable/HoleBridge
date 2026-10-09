@@ -6,20 +6,23 @@
 // the server on this node, so the handshakes that reach this node are answered here (router.go). The
 // firewall decides each handshake once. An admitted client gets the server's reply, and a UDX stream on the
 // node's socket is connected to the client, which the secret stream runs over, as upstream's server does for
-// a direct connection. The reply also names a holepunch id and the relays the record is stored on, and a
-// PEER_HOLEPUNCH for that id is answered here (answerHolepunch). The server does not punch yet: it has no
-// NAT samples, so its own firewall stays unknown, and no punch socket is wired to the DHT socket. Its relay
-// policy (relay.go) names the relay in each reply. A relayed handshake also pairs on that relay, but the direct
-// stream claims the connection first; only a forced server (the test seam dht.forceRelay) lets the paired relay
-// claim it, and then no direct stream is made.
+// a direct connection. The reply also names a holepunch id and the relays the record is stored on. Each
+// admitted handshake has a puncher (setupHolepuncher): a PEER_HOLEPUNCH for its id is answered from the
+// puncher's NAT samples (answerHolepunch), and the puncher punches toward the client when the client asks.
+// Its relay policy (relay.go) names the relay in each reply. A relayed handshake also pairs on that relay, but
+// the direct stream claims the connection first; only a forced server (the test seam dht.forceRelay) lets the
+// paired relay claim it, and then no direct stream is made. A forced punch (dht.forcePunch) claims the stream
+// only through the puncher, when the client's punch arrives from an address it named.
 package hyperdht
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
 	"math"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -66,6 +69,9 @@ const (
 	// headerExchangeWait is how long an admitted client has to finish the secret stream's header exchange. It is
 	// upstream's HANDSHAKE_INITIAL_TIMEOUT, the time an admitted handshake gets to connect before it is dropped.
 	headerExchangeWait = 10 * time.Second
+	// natAnalysisWait bounds how long a probe waits for the puncher's NAT samples. The samples are pings to
+	// a few nodes, so they are in long before this; upstream's analyzer waits the same way.
+	natAnalysisWait = 3 * time.Second
 )
 
 // nsPeerHandshake is NS.PEER_HANDSHAKE, the Noise prologue of every handshake.
@@ -120,7 +126,7 @@ type Server struct {
 	closed        bool
 	handshakes    map[string][]byte         // the reply to each handshake message seen: nil when refused
 	relays        []RelayInfo               // the nodes the record was stored on by the last announce
-	holepunches   map[uint64]*securePayload // the holepunch payload of each admitted handshake, by its id
+	holepunches   map[uint64]*holepunchSlot // the holepunch state of each admitted handshake, by its id
 	nextHolepunch uint64
 	conns         chan *Conn
 }
@@ -137,7 +143,7 @@ func (d *DHT) CreateServer(opts ServerOptions) *Server {
 		ctx:          ctx,
 		cancel:       cancel,
 		handshakes:   make(map[string][]byte),
-		holepunches:  make(map[uint64]*securePayload),
+		holepunches:  make(map[uint64]*holepunchSlot),
 		conns:        make(chan *Conn),
 	}
 	d.mu.Lock()
@@ -232,6 +238,17 @@ func (s *Server) Close() error {
 
 	s.d.forgetServer(s)
 	s.cancel()
+	s.mu.Lock()
+	punchers := make([]*holepuncher, 0, len(s.holepunches))
+	for _, slot := range s.holepunches {
+		if slot.p != nil {
+			punchers = append(punchers, slot.p)
+		}
+	}
+	s.mu.Unlock()
+	for _, p := range punchers {
+		p.destroy()
+	}
 	if !listening {
 		return nil
 	}
@@ -327,6 +344,7 @@ func (s *Server) admit(kp noise.KeyPair, msg []byte, from *net.UDPAddr, direct b
 	var holepunchID uint64
 	udxInfo := UDXInfo{Version: 1}
 	cl := &streamClaim{}
+	punched := s.d.forcePunch // only the puncher claims the stream (forcePunch)
 	// fail returns no reply, and drops the stream made for this handshake.
 	fail := func() []byte {
 		if st != nil {
@@ -339,9 +357,10 @@ func (s *Server) admit(kp noise.KeyPair, msg []byte, from *net.UDPAddr, direct b
 		if forced && offer == nil && p.RelayThrough == nil {
 			return fail() // a forced stream is claimed only through a relay, and this handshake names none
 		}
-		if !forced {
+		if !forced && !punched {
 			// The direct path claims the stream at once, as upstream does for a handshake that comes direct. A
-			// forced stream waits for its relay pairing, which claims it once the reply is out.
+			// forced stream waits for its relay pairing, which claims it once the reply is out, and a punched one
+			// waits for the puncher.
 			if err := st.Connect(uint32(p.UDX.ID), from); err != nil {
 				return fail()
 			}
@@ -367,8 +386,12 @@ func (s *Server) admit(kp noise.KeyPair, msg []byte, from *net.UDPAddr, direct b
 	}
 	if st != nil {
 		_, _, hash, _ := hs.Result()
-		s.keepHolepunch(holepunchID, punchSecret(hash))
 		keys := keysOf(hs)
+		slot := s.keepHolepunchWith(holepunchID, punchSecret(hash), offer != nil)
+		s.setupHolepuncher(slot, &p, st, keys, cl)
+		if punched {
+			return out
+		}
 		if forced {
 			// The relay claims the stream: this side's own relay as initiator, else the one the client offered.
 			if offer != nil {
@@ -403,17 +426,261 @@ func (s *Server) reserveHolepunch() uint64 {
 	return id
 }
 
-// keepHolepunch keeps the holepunch payload of an admitted handshake under id, for handshakeClearWait, as upstream
-// keeps a handshake's holepunch slot.
-func (s *Server) keepHolepunch(id uint64, secret [32]byte) {
+// holepunchSlot is the holepunch state of one admitted handshake: the coder of its probes, its puncher, the round
+// of the last probe that updated the puncher, and the channel closed when the puncher's NAT samples are in.
+type holepunchSlot struct {
+	sp         *securePayload
+	round      uint64
+	p          *holepuncher
+	sampled    chan struct{}
+	relayToken bool // the handshake's reply offered a relay: a punch that must wait is answered with TRY_LATER, not an abort
+}
+
+// keepHolepunch keeps the holepunch slot of an admitted handshake under id, for handshakeClearWait, as upstream
+// keeps a handshake's holepunch slot. Its puncher is stopped when the slot goes.
+func (s *Server) keepHolepunch(id uint64, secret [32]byte) *holepunchSlot {
+	return s.keepHolepunchWith(id, secret, false)
+}
+
+// keepHolepunchWith is keepHolepunch for a handshake whose reply offered a relay (relayToken). The flag is set before
+// the slot is published, so no probe reads it unset.
+func (s *Server) keepHolepunchWith(id uint64, secret [32]byte, relayToken bool) *holepunchSlot {
+	slot := &holepunchSlot{sp: newSecurePayload(secret), relayToken: relayToken}
 	s.mu.Lock()
-	s.holepunches[id] = newSecurePayload(secret)
+	s.holepunches[id] = slot
 	s.mu.Unlock()
 	time.AfterFunc(handshakeClearWait, func() {
 		s.mu.Lock()
-		delete(s.holepunches, id)
+		if s.holepunches[id] == slot {
+			delete(s.holepunches, id)
+		}
+		p := slot.p
 		s.mu.Unlock()
+		if p != nil {
+			p.destroy()
+		}
 	})
+	return slot
+}
+
+// setupHolepuncher makes the puncher of an admitted handshake, as upstream's setupHolepuncher does. The puncher
+// answers the client's probes and punches toward the addresses the client names. Its NAT samples are pings to a
+// few nodes, taken in the background; answerHolepunch waits for them. When the DHT's connections are punched
+// only (forcePunch), the puncher also claims the stream: a holepunch datagram from an address the client named
+// connects the stream to that address, and the secret stream runs over it.
+func (s *Server) setupHolepuncher(slot *holepunchSlot, p *NoisePayload, st *udx.Stream, keys secretstream.Keys, cl *streamClaim) {
+	cfg := punchConfig{Pool: s.d.punchPool(), RemoteFirewall: p.Firewall, Gate: s.d.gate()}
+	if s.d.forcePunch {
+		cfg.OnPunchFrom = func(sock punchSocket, from *net.UDPAddr) {
+			if !cl.take() {
+				return
+			}
+			conn, err := punchedConn(st, birthdayOf(sock), uint32(p.UDX.ID), from)
+			if err != nil {
+				st.Destroy()
+				return
+			}
+			s.mu.Lock()
+			hp := slot.p
+			s.mu.Unlock()
+			if hp != nil {
+				hp.destroy() // the stream runs on its socket now: the node's handle or a kept birthday socket
+			}
+			go s.serve(conn, keys)
+		}
+	}
+	hp := newHolepuncher(cfg)
+	sampled := make(chan struct{})
+	s.mu.Lock()
+	slot.p = hp
+	slot.sampled = sampled
+	s.mu.Unlock()
+	go func() {
+		defer close(sampled)
+		s.d.sampleNATFromPings(s.ctx, hp, s.d.observers())
+	}()
+}
+
+// observeProbe takes a NAT sample for the puncher of handshake id from a relayed probe: seen is the address the relay
+// gives the server (the probe's to), and from is the relay that forwarded the probe (upstream _onpeerholepunch,
+// p.nat.add(req.to, req.from)). It does nothing for an unknown id.
+func (s *Server) observeProbe(id uint64, seen, from Address) {
+	s.mu.Lock()
+	slot := s.holepunches[id]
+	s.mu.Unlock()
+	if slot == nil || slot.p == nil {
+		return
+	}
+	slot.p.observe(seen, from)
+}
+
+// answerHolepunch returns the server's encrypted reply to a holepunch probe for the handshake id. The probe's
+// payload came from the client at peer, through the relay at from. It returns nil when no admitted handshake has
+// id, or the payload does not decrypt. A probe for a handshake with a live puncher is answered from the puncher
+// (answerWithPuncher). Without a puncher, a probe that reports an error or asks to punch gets an abort, and any
+// other probe gets an answer with the token of the client's address when a relay of the record forwarded it.
+func (s *Server) answerHolepunch(id uint64, payload []byte, peer, from *net.UDPAddr) []byte {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	slot, ok := s.holepunches[id]
+	fromRelay := s.isRelayLocked(from)
+	var p *holepuncher
+	var sampled chan struct{}
+	if ok {
+		p, sampled = slot.p, slot.sampled
+	}
+	s.mu.Unlock()
+	if !ok {
+		return nil
+	}
+	remote, ok := slot.sp.decrypt(payload)
+	if !ok {
+		return nil
+	}
+	if p != nil && !p.destroyed() {
+		return s.answerWithPuncher(slot, p, sampled, remote, peer, fromRelay)
+	}
+	reply := HolepunchPayload{Firewall: firewallUnknown, Round: remote.Round, RemoteToken: remote.Token}
+	switch {
+	case remote.Error != 0 || remote.Punching:
+		reply = HolepunchPayload{Error: handshakeAborted, Firewall: firewallUnknown, Round: remote.Round}
+	case fromRelay:
+		token := slot.sp.token(addressOf(peer))
+		reply.Token = token[:]
+	}
+	out, err := slot.sp.encrypt(reply)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+// answerWithPuncher answers a probe for a handshake whose puncher p is live, as upstream's _onpeerholepunch does.
+// The probe's firewall, addresses and punching state update the puncher, and a probe that asks to punch starts the
+// punch once the NAT samples are in. The reply carries the puncher's own NAT state, and the client's token echoed
+// back when a relay forwarded the probe. An error, or a punch the puncher cannot start, aborts the handshake's
+// punch.
+func (s *Server) answerWithPuncher(slot *holepunchSlot, p *holepuncher, sampled chan struct{}, remote HolepunchPayload, peer *net.UDPAddr, fromRelay bool) []byte {
+	if remote.Error != 0 {
+		return s.abortPunch(slot, p, remote.Round)
+	}
+	token := slot.sp.token(addressOf(peer))
+	echoed := fromRelay && bytes.Equal(remote.RemoteToken, token[:])
+	s.mu.Lock()
+	update := remote.Round >= slot.round
+	if update {
+		slot.round = remote.Round
+	}
+	s.mu.Unlock()
+	if update {
+		var echo netip.Addr
+		if echoed {
+			echo = addressOf(peer).Host
+		}
+		p.updateRemote(remote.Firewall, remote.Punching, remote.Addresses, echo)
+	}
+	if sampled != nil {
+		select {
+		case <-sampled:
+		case <-time.After(natAnalysisWait):
+		case <-s.ctx.Done():
+			return nil
+		}
+	}
+	// Fast open: a consistent NAT whose address the client names as its session target punches back at once, so the
+	// client's punch is not the first datagram on the path (upstream _onpeerholepunch, fast mode).
+	if coerceFirewall(p.natFirewall()) == firewallConsistent && remote.RemoteAddress != nil && namesAddress(p.natAddresses(), *remote.RemoteAddress) {
+		if sock := p.probeSocket(); sock != nil {
+			sendHolepunch(sock, addressOf(peer), false) // never fails
+		}
+	}
+	if remote.Punching {
+		if remoteF, localF, _ := p.firewalls(); (remoteF >= firewallRandom || localF >= firewallRandom) && !p.gate.ready(time.Now()) {
+			return s.tryLater(slot, p, remote, peer, fromRelay)
+		}
+		punching, err := p.punch()
+		if p.destroyed() {
+			return nil
+		}
+		if errors.Is(err, errPunchGated) {
+			return s.tryLater(slot, p, remote, peer, fromRelay)
+		}
+		if err != nil || !punching {
+			return s.abortPunch(slot, p, remote.Round)
+		}
+	}
+	reply := HolepunchPayload{
+		Firewall:    p.natFirewall(),
+		Round:       remote.Round,
+		Connected:   p.connected(),
+		Punching:    p.isPunching(),
+		Addresses:   p.natAddresses(),
+		RemoteToken: remote.Token,
+	}
+	if fromRelay {
+		reply.Token = token[:]
+	}
+	out, err := slot.sp.encrypt(reply)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+// abortPunch stops the puncher of a handshake and returns the abort reply to its probe (upstream _abort).
+func (s *Server) abortPunch(slot *holepunchSlot, p *holepuncher, round uint64) []byte {
+	return s.abortPunchWith(slot, p, round, handshakeAborted)
+}
+
+// tryLater answers a punching probe with TRY_LATER while randomized punches run (upstream _onpeerholepunch). A handshake
+// with a relay keeps its puncher, and the answer echoes the client's token when a relay forwarded the probe. Without a
+// relay the handshake is aborted with that error.
+func (s *Server) tryLater(slot *holepunchSlot, p *holepuncher, remote HolepunchPayload, peer *net.UDPAddr, fromRelay bool) []byte {
+	if !slot.relayToken {
+		return s.abortPunchWith(slot, p, remote.Round, holepunchTryLater)
+	}
+	token := slot.sp.token(addressOf(peer))
+	reply := HolepunchPayload{
+		Error:       holepunchTryLater,
+		Firewall:    p.natFirewall(),
+		Round:       remote.Round,
+		Connected:   p.connected(),
+		Punching:    p.isPunching(),
+		Addresses:   p.natAddresses(),
+		RemoteToken: remote.Token,
+	}
+	if fromRelay {
+		reply.Token = token[:]
+	}
+	out, err := slot.sp.encrypt(reply)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+// namesAddress reports whether a is one of addrs, by host and port.
+func namesAddress(addrs []Address, a Address) bool {
+	for _, x := range addrs {
+		if x.Host == a.Host && x.Port == a.Port {
+			return true
+		}
+	}
+	return false
+}
+
+// abortPunchWith is abortPunch with the error code of the reply: handshakeAborted, or holepunchTryLater when a
+// handshake without a relay cannot wait (upstream _abort(h, ERROR.TRY_LATER)).
+func (s *Server) abortPunchWith(slot *holepunchSlot, p *holepuncher, round uint64, code uint64) []byte {
+	p.destroy()
+	out, err := slot.sp.encrypt(HolepunchPayload{Error: code, Firewall: firewallUnknown, Round: round})
+	if err != nil {
+		return nil
+	}
+	return out
 }
 
 // relayList returns a copy of the relays the record was stored on by the last announce.
@@ -435,42 +702,6 @@ func (s *Server) isRelayLocked(addr *net.UDPAddr) bool {
 		}
 	}
 	return false
-}
-
-// answerHolepunch returns the server's encrypted reply to a holepunch probe for the handshake id. The probe's
-// payload came from the client at peer, through the relay at from. It returns nil when no admitted handshake has
-// id, or the payload does not decrypt. A probe that reports an error or asks to punch gets an abort, since the
-// server's firewall is unknown and it does not punch yet. Upstream's server answers this way, with the token of
-// the client's address when a relay of the record forwarded the probe.
-func (s *Server) answerHolepunch(id uint64, payload []byte, peer, from *net.UDPAddr) []byte {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
-		return nil
-	}
-	sp, ok := s.holepunches[id]
-	fromRelay := s.isRelayLocked(from)
-	s.mu.Unlock()
-	if !ok {
-		return nil
-	}
-	remote, ok := sp.decrypt(payload)
-	if !ok {
-		return nil
-	}
-	reply := HolepunchPayload{Firewall: firewallUnknown, Round: remote.Round, RemoteToken: remote.Token}
-	switch {
-	case remote.Error != 0 || remote.Punching:
-		reply = HolepunchPayload{Error: handshakeAborted, Firewall: firewallUnknown, Round: remote.Round}
-	case fromRelay:
-		token := sp.token(addressOf(peer))
-		reply.Token = token[:]
-	}
-	out, err := sp.encrypt(reply)
-	if err != nil {
-		return nil
-	}
-	return out
 }
 
 // serveRelayed claims st through a relay pairing (pairRelay) on the relay offer r, as initiator or responder, and

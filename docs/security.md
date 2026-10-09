@@ -200,9 +200,10 @@ cannot be replayed into another session.
    Public keys are fine to log. Error messages and the app's diagnostics also redact addresses and
    service names.
 2. **Randomness** comes from `crypto/rand` (Go), `sodium` (engine) or `Random.secure` (Dart) only.
-3. **`host.json` holds the key and `app.key` the application key.** The Go host and relay write
-   both with mode `0600` and, on POSIX systems, refuse to start if either is readable by group or
-   others, as `ssh` does with private keys.
+3. **`host.json` holds the key, `app.key` the application key and `relay.key` the relay key.** The Go
+   host and relay write them with mode `0600` and, on POSIX systems, refuse to start if one is
+   readable by group or others, as `ssh` does with private keys. `relay check` refuses a relay key
+   file that others can read too.
 4. **The app stores keys and application keys in the platform's secure storage** (Keychain, Android
    Keystore-backed storage, the desktop equivalents), never in plain preferences. On iOS the
    keychain group is shared only with HoleBridge's own VPN extension. On Android, app backup is off

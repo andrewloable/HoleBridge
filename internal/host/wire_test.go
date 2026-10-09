@@ -343,6 +343,80 @@ func TestUDPFlowDHTRouteComesBack(t *testing.T) {
 	expectDatagram(t, c, 1, "second")
 }
 
+// A new flow is opened off the session's message path (startFlow). The dial of flow 1 stands in for a slow name
+// lookup and blocks until the test releases it. While it is blocked, the session still serves its other messages:
+// a flow to another udp service gets its reply, a stream opened on the session echoes, and a datagram on an open
+// flow reaches its target. When the lookup returns, flow 1's first payload is the first datagram its target gets,
+// and its reply comes back.
+func TestSlowFlowLookupDoesNotBlockSession(t *testing.T) {
+	r := newRig(t)
+	fast, _ := udpEcho(t)
+	slow, _ := udpEcho(t)
+	cfg := r.hostConfig(t, map[string]config.Service{
+		"echo": {Target: echoTarget(t), Kind: "tcp"},
+		"fast": {Target: fast, Kind: "udp"},
+		"slow": {Target: slow, Kind: "udp"},
+	}, nil)
+
+	// Only flow 1 dials the slow service. The dial waits for release, or for readWait so that a failing test does
+	// not leave it blocked for good.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	h := r.newWireHost(t, cfg, func(o *Options) {
+		o.udpDial = func(network, address string) (net.Conn, error) {
+			if address == slow {
+				close(entered)
+				select {
+				case <-release:
+				case <-time.After(readWait):
+				}
+			}
+			return net.Dial(network, address)
+		}
+	})
+	hostSide, appSide := r.lanPair(t, kpOf(r.clientKey))
+	serveConn(t, h, hostSide)
+
+	c, err := hosttest.Attach(appSide)
+	failIfStub(t, err)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	t.Cleanup(func() { c.Close() })
+
+	if err := c.Send(protocol.Flow{Flow: 1, Service: "slow", Payload: []byte("stuck")}); err != nil {
+		t.Fatalf("Send flow 1: %v", err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(readWait):
+		t.Fatal("the dial of the slow flow did not start")
+	}
+
+	// Flow 1's lookup stays blocked from here until release, so none of these may wait for it.
+	if err := c.Send(protocol.Flow{Flow: 2, Service: "fast", Payload: []byte("quick")}); err != nil {
+		t.Fatalf("Send flow 2: %v", err)
+	}
+	expectDatagram(t, c, 2, "quick")
+	st, err := c.Open("echo")
+	failIfStub(t, err)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	if got := roundTrip(t, st, []byte("hello")); string(got) != "hello" {
+		t.Fatalf("the stream echoed %q, want %q", got, "hello")
+	}
+	if err := c.Send(protocol.Datagram{Flow: 2, Payload: []byte("again")}); err != nil {
+		t.Fatalf("Send datagram: %v", err)
+	}
+	expectDatagram(t, c, 2, "again")
+
+	// The lookup returns: flow 1's first payload reaches its target, and the target's reply comes back.
+	close(release)
+	expectDatagram(t, c, 1, "stuck")
+}
+
 // The DHT route's size limit (docs/architecture.md, UDP services). The widest flow id takes 9 bytes in the
 // frame and a payload of 253 bytes or more a 3-byte length prefix, so maxDatagram of 1144 bytes gives a 1156-byte
 // frame, the largest unordered message. It passes both ways. One byte more is dropped by the host as too large.

@@ -117,9 +117,12 @@ The same page serves the TV handoff link (`/h#...`). It holds no state, logs not
 third-party scripts (any script on the page could read the key) and sets a strict Content Security
 Policy.
 
-`host` runs in the foreground; under Docker the restart policy keeps it up. Before M3, changes to
-`host.json` need a host restart, and `service add` on a running host says so. From M3 the host
-reloads on `SIGHUP` or `holebridge service add/rm`, and pushes the new list to connected apps.
+`host` runs in the foreground; under Docker the restart policy keeps it up. A running host reloads
+`host.json` when `service add` or `service rm` changes it: the command asks the host over the control
+socket and says the change was applied. If the host cannot be asked, the command says to restart it.
+SIGHUP (`kill -HUP <pid>`, the pid in `host.lock`) reloads it too.
+A reload pushes the new service list to the connected apps. A changed key moves the host to the new
+key and closes its sessions.
 
 ## Running a relay
 
@@ -136,9 +139,11 @@ Public UDP 203.0.113.7:49737 firewalled=false randomized=false
 
 - `firewalled=true` means the UDP ports are not open yet.
 - `randomized=true` means the server is behind a NAT that changes ports, so it cannot be a relay.
+- `relay` and `relay check` start on the public HyperDHT bootstrap nodes. `--bootstrap <host:port,...>`
+  replaces them, for a private network.
 
 Then put the same relay key in `host.json` (`relay`) and in the app (Settings > Relay). The full VPS
-walkthrough is `docs/relay.md`, written with the MVP.
+walkthrough is [relay.md](relay.md).
 
 ## Configuration
 

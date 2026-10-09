@@ -192,7 +192,8 @@ D36). Both ends are the HoleBridge app: the app engine on each side, no host inv
   after 5 minutes, or when the user leaves the screen.
 - **Errors.** `HB-HANDOFF-UNREACHABLE` when the phone cannot reach the TV. The fix it states: the
   same network, and not a guest network with client isolation. `HB-HANDOFF-EXPIRED` when the code
-  timed out.
+  timed out. `HB-HANDOFF-REFUSED` when the TV does not accept the box: the code on the phone is old,
+  or it came from another TV.
 
 **Formats (proposed until M2 commits `spec/vectors/handoff.json`):**
 - **The TV's link:** `https://holebridge.app/h#1.<public key>.<secret>.<port>.<addresses>`. `1` is
@@ -456,7 +457,9 @@ uses flows, not streams.
     listeners. Each source address that sends to it becomes a flow, with an id the app chooses.
   - **Host side:** the host opens one ephemeral UDP socket per flow, connected to the service's
     configured target. Replies route back to that flow, and datagrams from any other source are
-    dropped.
+    dropped. A new flow's socket is opened off the session's message path, so a slow name lookup
+    holds up that one flow and nothing else: the session's other messages and its open flows keep
+    moving. A datagram that arrives while its flow is still being opened is dropped, as UDP allows.
 - **Opening a flow.** The app sends `flow` (message 9) on the ordered channel, carrying the service
   and the flow's first datagram, so the first packet (a DNS query, a game handshake) is never lost
   to a setup race.
@@ -570,7 +573,7 @@ in `host.json`, tuned during M2:
 | UDP flows | 256 per session, 4096 in total | Each flow holds a host-side socket |
 | UDP flow idle | 60 s, or the service's `idle` | Mirrors common NAT UDP timeouts |
 | Max datagram (`maxDatagram`) | 1144 bytes (the 1156-byte unordered message measured in M1, [spike-m1](spike-m1.md#unordered-datagrams), less the 12-byte frame header at the widest flow id) | The largest payload that fits one unordered message after the frame header; larger datagrams are dropped and counted |
-| Largest protocol frame (Protomux, `maxFrame`) | 16777215 bytes (2^24 - 1) | The secret stream writes a frame atomically up to this size, and upstream Protomux splits a batch at 8 MiB so a batch stays under it. A frame over it is refused on send and fails the stream on receive. A data message carries at most 65536 bytes, so its frame is about 65544 bytes |
+| Largest protocol frame (Protomux, `maxFrame`) | 16777215 bytes (2^24 - 1) | The secret stream writes a frame atomically up to this size, and upstream Protomux splits a batch at 8 MiB so a batch stays under it. A frame over it is refused on send and fails the stream on receive. A batch inside a batch fails the stream on receive too, since upstream never sends one. A data message carries at most 65536 bytes, so its frame is about 65544 bytes |
 | Ordered datagram queue (LAN route) | 256 KiB per session, drop when full | UDP never waits; a stalled channel drops instead |
 | Receive budget per process | 64 MiB in the app, 256 MiB on the host | Bounds memory however many streams stall: new grants are min(2 MiB, budget left / open streams), and once it is spent credit only follows draining; a stream left with none is granted its share when credit frees |
 | Idle timeout | per service, **off** by default | SSH and database connections sit idle for hours; a fixed HTTP-style idle timeout would cut them |
@@ -702,8 +705,9 @@ app never probes.
 - **Detected.** A service added without `--kind` is checked by the Go host itself, from the host,
   when it is added and at host start.
   1. It connects to the target (3 s connect timeout).
-  2. It tries a TLS handshake plus one HTTP request, accepting self-signed certificates for the
-     check (3 s response timeout).
+  2. It tries a TLS handshake plus one HTTP request (3 s response timeout). For the check only, the
+     handshake accepts self-signed certificates, TLS 1.0 and 1.1, and RSA key exchange, so an old
+     NAS, camera or router is still seen as https.
   3. Then it tries plain HTTP the same way.
 - **Results.**
 
@@ -711,7 +715,8 @@ app never probes.
   |---|---|
   | HTTP response over TLS | `https` |
   | HTTP response over plain TCP | `http` |
-  | A plain-HTTP reply that says the port expects TLS | `https` |
+  | A plain-HTTP reply that says the port expects TLS (the nginx, Go or Apache wording) | `https` |
+  | A TLS server hello or alert, with no HTTP response over TLS (the handshake was refused) | `https` |
   | The target stays open and sends non-HTTP bytes, or stays silent past the timeout on two probes | `tcp` |
   | Refused, timed out on connect, name not resolved, or accepted and then closed or reset | *inconclusive*: the previous kind is kept, or `unknown` if there is none |
 
@@ -729,7 +734,7 @@ app never probes.
             connect (3 s) ── refused / timeout / no DNS / closed ──▶ inconclusive: keep kind
                 │ open
                 ▼
-     TLS + HTTP (3 s) ── HTTP reply ──▶ https
+     TLS + HTTP (3 s) ── HTTP reply, or a TLS hello/alert ──▶ https
                 │ no
                 ▼
      plain HTTP (3 s) ── HTTP reply ──▶ http   (a "TLS expected" reply ──▶ https)
@@ -822,7 +827,11 @@ target.
   servers to the same DHT node).
 - **Status (M3):** a local control socket (a Unix socket in the config directory, a named pipe on
   Windows) answers `holebridge status`: services, sessions and their routes, streams, bytes, NAT
-  type.
+  type. The socket serves only while the config directory is owned by the user and has mode `0700`
+  (HB-CONFIG-DIR-PERMS otherwise), and the socket file is never wider than `0600`. A request line
+  must arrive within 5 s and the answer must be taken within 5 s; a status query gives up after 10 s
+  and a reload after 30 s. On Windows a named pipe takes no deadline, so the server-side 5 s bounds
+  do not apply there; the query bounds do.
 - **App:** keeps the following in the platform's secure storage (on iOS, a keychain group shared
   with its own VPN extension), because a saved key is a secret:
   - the hosts you added and their last LAN addresses;

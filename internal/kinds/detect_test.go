@@ -2,6 +2,7 @@ package kinds
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -157,4 +158,80 @@ func TestDetectAcceptThenCloseIsInconclusive(t *testing.T) {
 		c.Close()
 	})
 	expectDetect(t, addr, testOptions, protocol.KindUnknown, false)
+}
+
+// tlsServer runs an HTTPS server with cfg on 127.0.0.1 until the test ends, and returns its address. The
+// certificate is the one net/http/httptest uses.
+func tlsServer(t *testing.T, cfg *tls.Config) string {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(hello)
+	srv.TLS = cfg
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return srv.Listener.Addr().String()
+}
+
+// requireRefusedByDefaultClient fails the test unless Go's default TLS client refuses addr. The old setups
+// below only test the probe when the default client fails on them.
+func requireRefusedByDefaultClient(t *testing.T, addr string) {
+	t.Helper()
+	conn, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true})
+	if err == nil {
+		conn.Close()
+		t.Fatal("the default TLS client completes the handshake, so the test does not cover the old setup")
+	}
+}
+
+// Case 8: an HTTPS server that speaks only TLS 1.0 is https. Go's default client refuses TLS 1.0, so the
+// probe must accept it.
+func TestDetectTLS10ServerIsHTTPS(t *testing.T) {
+	addr := tlsServer(t, &tls.Config{MinVersion: tls.VersionTLS10, MaxVersion: tls.VersionTLS10})
+	requireRefusedByDefaultClient(t, addr)
+	expectDetect(t, addr, testOptions, protocol.KindHTTPS, true)
+}
+
+// Case 9: an HTTPS server that offers only RSA key exchange (TLS 1.2) is https. Go's default client has no
+// such suite, so the probe must accept it.
+func TestDetectRSAKeyExchangeOnlyIsHTTPS(t *testing.T) {
+	addr := tlsServer(t, &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		MaxVersion:   tls.VersionTLS12,
+		CipherSuites: []uint16{tls.TLS_RSA_WITH_AES_128_CBC_SHA},
+	})
+	requireRefusedByDefaultClient(t, addr)
+	expectDetect(t, addr, testOptions, protocol.KindHTTPS, true)
+}
+
+// Case 10: a target that answers the TLS hello with a TLS alert and closes speaks TLS, so it is https. The
+// plain probe would read the alert as bytes that are not HTTP and say tcp.
+func TestDetectTLSAlertIsHTTPS(t *testing.T) {
+	addr := serve(t, func(c net.Conn) {
+		var buf [1024]byte
+		_, _ = c.Read(buf[:])                                     // the TLS hello
+		c.Write([]byte{0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x28}) // fatal handshake_failure
+		c.Close()
+	})
+	expectDetect(t, addr, testOptions, protocol.KindHTTPS, true)
+}
+
+// Case 11: the plain-HTTP error pages of Go and Apache say the port expects TLS, as nginx's does, so both
+// are https.
+func TestDetectOtherTLSHintsAreHTTPS(t *testing.T) {
+	replies := map[string]string{
+		"Go": "HTTP/1.0 400 Bad Request\r\n\r\nClient sent an HTTP request to an HTTPS server.\n",
+		"Apache": "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n" +
+			"<html><body><h1>Bad Request</h1>\n<p>Reason: You're speaking plain HTTP to an SSL-enabled server port.</p>\n" +
+			"</body></html>\n",
+	}
+	for name, reply := range replies {
+		t.Run(name, func(t *testing.T) {
+			addr := serve(t, func(c net.Conn) {
+				var buf [1024]byte
+				_, _ = c.Read(buf[:])
+				io.WriteString(c, reply)
+				c.Close()
+			})
+			expectDetect(t, addr, testOptions, protocol.KindHTTPS, true)
+		})
+	}
 }

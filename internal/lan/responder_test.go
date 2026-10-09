@@ -2,6 +2,7 @@ package lan
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"net"
 	"os"
@@ -160,5 +161,70 @@ func TestReplyNeverLongerThanProbe(t *testing.T) {
 		if len(reply) > len(raw) {
 			t.Errorf("probe %d (%d bytes): reply is %d bytes", i, len(raw), len(reply))
 		}
+	}
+}
+
+// fakeClock is a clock the test moves by hand.
+type fakeClock struct{ now time.Time }
+
+func (c *fakeClock) Now() time.Time          { return c.now }
+func (c *fakeClock) Advance(d time.Duration) { c.now = c.now.Add(d) }
+
+// nonceOf returns a distinct nonce for i.
+func nonceOf(i int) [16]byte {
+	var n [16]byte
+	binary.LittleEndian.PutUint32(n[:], uint32(i))
+	return n
+}
+
+// Case 10: a seen nonce stays in the replay cache for 48 h on the monotonic clock and is dropped
+// after that. The bound is 48 h, not 24 h: a probe timestamped 24 h ahead is still fresh 48 h after it
+// was first seen, so an earlier expiry would let a replay through.
+func TestReplayCacheExpiresAfter48h(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1767225600, 0)}
+	r := NewResponder([32]byte{}, lanTCPPort, nil, clock.Now)
+	r.mono = clock.Now
+	n := nonceOf(1)
+	if !r.remember(n) {
+		t.Fatal("a new nonce was not remembered")
+	}
+	clock.Advance(47*time.Hour + 59*time.Minute)
+	if r.remember(n) {
+		t.Fatal("a nonce seen 47 h 59 min ago was forgotten")
+	}
+	clock.Advance(time.Minute) // exactly 48 h since the first sighting
+	if r.remember(n) {
+		t.Fatal("a nonce seen exactly 48 h ago was forgotten: it is still fresh at that age")
+	}
+	clock.Advance(time.Second) // more than 48 h
+	if !r.remember(n) {
+		t.Fatal("a nonce seen more than 48 h ago is still in the replay cache")
+	}
+}
+
+// Case 11: the replay cache holds at most 100000 nonces, and the oldest one goes first.
+func TestReplayCacheCapEvictsOldest(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1767225600, 0)}
+	r := NewResponder([32]byte{}, lanTCPPort, nil, clock.Now)
+	r.mono = clock.Now
+	for i := 0; i < maxSeen; i++ {
+		if !r.remember(nonceOf(i)) {
+			t.Fatalf("nonce %d was not new", i)
+		}
+	}
+	if len(r.order) != maxSeen || len(r.seen) != maxSeen {
+		t.Fatalf("cache holds %d and %d entries, want %d", len(r.order), len(r.seen), maxSeen)
+	}
+	if !r.remember(nonceOf(maxSeen)) {
+		t.Fatal("a new nonce was not remembered")
+	}
+	if len(r.order) != maxSeen || len(r.seen) != maxSeen {
+		t.Fatalf("cache holds %d and %d entries after one more, want %d", len(r.order), len(r.seen), maxSeen)
+	}
+	if r.remember(nonceOf(maxSeen - 1)) {
+		t.Fatal("the newest nonce was evicted: it is new again")
+	}
+	if !r.remember(nonceOf(0)) {
+		t.Fatal("the oldest nonce is still in the replay cache after the cap evicted it")
 	}
 }

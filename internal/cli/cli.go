@@ -29,8 +29,8 @@ Commands:
   holebridge service ls
   holebridge key [--rotate | --set <key>]
   holebridge app-key [--new | --rotate | --set <hex>]
-  holebridge relay [--new-key]
-  holebridge relay check <relay-key-file>
+  holebridge relay [--new-key | --bootstrap <host:port,...>]
+  holebridge relay check <relay-key-file> [--bootstrap <host:port,...>]
   holebridge status
 
 Global options, before or after the command:

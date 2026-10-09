@@ -4,7 +4,6 @@ import (
 	"context"
 	"net"
 
-	"github.com/andrewloable/HoleBridge/pears/hyperdht"
 	"github.com/andrewloable/HoleBridge/pears/secretstream"
 )
 
@@ -13,13 +12,12 @@ import (
 // route). The stream must prove the client key pair, as the DHT firewall requires; any other key is closed
 // without a handshake. ServeConn returns when the stream ends or ctx is done.
 func (h *Host) ServeConn(ctx context.Context, s *secretstream.Stream) {
-	if h.refuse(s.RemotePublicKey(), hyperdht.HandshakePayload{}) {
+	if h.refuse(h.clientKey(), s.RemotePublicKey()) || !h.trackAdmitted(s) {
 		s.Destroy()
 		return
 	}
 	stop := context.AfterFunc(ctx, func() { s.Destroy() })
 	defer stop()
-	h.track(s)
 	h.serve(s, true)
 }
 

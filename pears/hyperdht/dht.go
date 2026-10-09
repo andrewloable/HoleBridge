@@ -13,6 +13,7 @@ import (
 	"errors"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/andrewloable/HoleBridge/pears/dhtrpc"
 	"github.com/andrewloable/HoleBridge/pears/noise"
@@ -51,6 +52,14 @@ type DHT struct {
 	// its streams only through a hole punch, never on the direct path or through a relay. Loopback always has a
 	// direct path, so this is how the punch tests make the bytes cross a punched path.
 	forcePunch bool
+
+	punch   punchHub    // the live punch handles, which the DHT's holepunch datagrams go to (punch_connect.go)
+	randoms *randomGate // the limit on randomized punches of this DHT (gate)
+}
+
+// gate returns the DHT's gate on randomized punches (dht._randomPunchLimit and _randomPunchInterval).
+func (d *DHT) gate() *randomGate {
+	return d.randoms
 }
 
 // ErrDHTClosed is the error of a Connect on a DHT that Close has stopped.
@@ -163,6 +172,7 @@ func newDHT(n *dhtrpc.Node, kp noise.KeyPair) *DHT {
 		records: newRecordStore(),
 		routes:  newRouteTable(),
 		decide:  make(chan struct{}, maxHandshakes),
+		randoms: &randomGate{limit: 1, interval: 20 * time.Second},
 	}
 	n.Handle(cmdLookup, d.onLookup)
 	n.Handle(cmdAnnounce, d.onAnnounce)
@@ -170,6 +180,7 @@ func newDHT(n *dhtrpc.Node, kp noise.KeyPair) *DHT {
 	n.Handle(cmdFindPeer, d.onFindPeer)
 	n.Handle(cmdPeerHandshake, d.onPeerHandshake)
 	n.Handle(cmdPeerHolepunch, d.onPeerHolepunch)
+	n.OnPunch(d.punch.deliver)
 	return d
 }
 

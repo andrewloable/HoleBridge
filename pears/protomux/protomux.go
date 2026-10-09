@@ -2,8 +2,8 @@
 // each with a protocol name, an optional ID, a handshake, and numbered messages.
 //
 // Ported from protomux 3.12.1 (index.js), MIT License, Copyright (c) 2021 Mathias Buus. The
-// stream carries one protomux frame per Write, and each Read returns one whole frame, as the
-// Noise secret stream gives upstream.
+// stream carries one protomux frame per Write, and each Read (or ReadFrame, for a FrameReader) returns one
+// whole frame, as the Noise secret stream gives upstream.
 //
 // A received batch of several messages is answered as one batch, as upstream corks it while the
 // handlers reply. A batch that reaches maxBatch is sent and a new one started, and a frame longer than
@@ -21,8 +21,8 @@ import (
 
 // maxBatch is the batch size at which upstream starts a new batch (MAX_BATCH, 8 MiB). maxFrame is the
 // largest frame upstream writes: the secret stream writes a frame atomically up to 2^24 - 1 bytes
-// (MAX_ATOMIC_WRITE). readBufSize holds one whole frame, so a Read returns a frame in one piece; a frame
-// longer than readBufSize fails the stream.
+// (MAX_ATOMIC_WRITE). A stream that is not a FrameReader is read into a readBufSize buffer, which holds one
+// whole frame, so a Read returns a frame in one piece; a frame longer than readBufSize fails the stream.
 const (
 	maxBatch    = 8 << 20
 	maxFrame    = 1<<24 - 1
@@ -274,14 +274,20 @@ func (msg *Message) Send(payload []byte) error {
 	return m.emitLocked(localID, e.Bytes())
 }
 
+// FrameReader is a stream that returns one whole frame per call. A secret stream returns each message as it
+// was decrypted, so a Mux that reads it needs no buffer of its own, and an idle Mux holds no frame-sized memory.
+// The returned slice is the caller's to keep.
+type FrameReader interface {
+	ReadFrame() ([]byte, error)
+}
+
 // readLoop handles frames until the stream fails, then closes every local channel.
 func (m *Mux) readLoop() {
-	buf := make([]byte, readBufSize)
+	next := m.frameSource()
 	for {
-		n, err := m.stream.Read(buf)
-		if err == nil && n > 0 {
-			// Copy the frame: handlers keep the handshakes and payloads they are given.
-			err = m.receive(append([]byte(nil), buf[:n]...))
+		frame, err := next()
+		if err == nil && len(frame) > 0 {
+			err = m.receive(frame)
 		}
 		if err != nil {
 			m.stream.Close()
@@ -291,31 +297,54 @@ func (m *Mux) readLoop() {
 	}
 }
 
+// frameSource returns the function that reads the next frame. A FrameReader is read with ReadFrame. Any other
+// stream is read into a buffer of readBufSize, which holds one whole frame.
+func (m *Mux) frameSource() func() ([]byte, error) {
+	if fr, ok := m.stream.(FrameReader); ok {
+		return fr.ReadFrame
+	}
+	buf := make([]byte, readBufSize)
+	return func() ([]byte, error) {
+		n, err := m.stream.Read(buf)
+		if err != nil {
+			return nil, err
+		}
+		// Copy the frame: handlers keep the handshakes and payloads they are given.
+		return append([]byte(nil), buf[:n]...), nil
+	}
+}
+
 // receive handles one frame: a remote id, then the rest.
 func (m *Mux) receive(frame []byte) error {
 	remoteID, body, err := readUint(frame)
 	if err != nil {
 		return err
 	}
-	return m.decode(remoteID, body)
+	return m.decode(remoteID, body, false)
 }
 
-// decode handles a type and the rest after a remote id. Remote id 0 is the control session.
-func (m *Mux) decode(remoteID uint64, b []byte) error {
+// decode handles a type and the rest after a remote id. Remote id 0 is the control session. inBatch is true
+// for an entry of a batch.
+func (m *Mux) decode(remoteID uint64, b []byte, inBatch bool) error {
 	typ, b, err := readUint(b)
 	if err != nil {
 		return err
 	}
 	if remoteID == 0 {
-		return m.control(typ, b)
+		return m.control(typ, b, inBatch)
 	}
 	m.message(remoteID, typ, b)
 	return nil
 }
 
-func (m *Mux) control(typ uint64, b []byte) error {
+// control handles a control message. Upstream never nests a batch, so a batch inside a batch is a malformed
+// frame. Refusing it keeps the recursion at two levels, however deep a frame nests.
+func (m *Mux) control(typ uint64, b []byte, inBatch bool) error {
 	switch typ {
 	case ctlBatch:
+		if inBatch {
+			return errFrame
+		}
 		return m.readBatch(b)
 	case ctlOpen:
 		return m.readOpen(b)
@@ -361,7 +390,7 @@ func (m *Mux) readBatch(b []byte) (err error) {
 			m.Cork()
 			corked = true
 		}
-		if err := m.decode(remoteID, b[:n]); err != nil {
+		if err := m.decode(remoteID, b[:n], true); err != nil {
 			return err
 		}
 		b = b[n:]

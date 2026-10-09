@@ -7,7 +7,11 @@
 // connection: the client's UDX stream is connected to the server's stream, and the secret stream runs its
 // header exchange over it. The direct path claims the stream at once. A connect that has a relay (relay.go)
 // also dials that relay and pairs on it; the paired relay claims the stream when the direct path has not,
-// as upstream's relayConnection does. Holepunching is not ported.
+// as upstream's relayConnection does. A reply that came through another node is relayed, as upstream sees it: its
+// first verified reply starts the punch of punch_flow.go when the server names relays, and the punch claims the
+// stream; a relayed reply that cannot be punched claims the server address, as upstream's fallback does. A direct
+// reply claims the stream at once. The test seam dht.forcePunch punches every connect, whatever the reply. The LAN
+// ping of upstream connectThroughNode is not ported.
 package hyperdht
 
 import (
@@ -15,6 +19,7 @@ import (
 	"errors"
 	"math"
 	"net"
+	"sync"
 
 	"golang.org/x/crypto/blake2b"
 
@@ -73,15 +78,22 @@ func (d *DHT) connect(ctx context.Context, pk [32]byte, opts ConnectOptions, for
 // path and a paired relay both claim the stream through claim, and the first to take it wins.
 type attempt struct {
 	d       *DHT
+	ctx     context.Context
 	pk      [32]byte
 	st      *udx.Stream
 	hs      *noise.Handshake
 	offer   *relayOffer // the relay this connect offers, or nil
 	forced  bool        // only a relay may claim the stream
+	punched bool        // the punch seam (dht.forcePunch): only the hole punch may claim the stream
 	claim   streamClaim
-	started bool             // a verified reply has started the relay path; only the first reply does
-	pending bool             // the relay path has not reported its outcome yet
-	relayed chan claimResult // the relay path's outcome, buffered for its one result
+	started bool // the first verified reply has been acted on; later replies are ignored
+	// producers counts the relay path and the punch that have not reported their outcome yet. The first success
+	// ends the dial; an error ends it only when no other producer is still pending (upstream keeps waiting for the
+	// relay while a punch fails). Only the dial goroutine changes it.
+	producers int
+	relayed   chan claimResult // the outcomes of the relay path and the punch, buffered for both
+	once      sync.Once        // sets the punch's outcome in relayed once (finish)
+	punch     *holepuncher     // the puncher of a punched connect, stopped when the dial returns
 }
 
 // dial sends the client's handshake to each node that holds a record of pk, and returns the connection that the
@@ -109,8 +121,11 @@ func (d *DHT) dial(ctx context.Context, st *udx.Stream, pk [32]byte, kp noise.Ke
 		st.Destroy()
 		return nil, nil, err
 	}
-	a := &attempt{d: d, pk: pk, st: st, hs: hs, offer: offer, forced: forced, relayed: make(chan claimResult, 1)}
+	a := &attempt{d: d, ctx: ctx, pk: pk, st: st, hs: hs, offer: offer, forced: forced, punched: d.forcePunch, relayed: make(chan claimResult, 2)}
 	defer func() {
+		if a.punch != nil {
+			a.punch.destroy() // a punch still running ends with the dial
+		}
 		if err != nil {
 			a.claim.take() // a relay pairing still running must not claim a stream that is given up
 			st.Destroy()
@@ -126,7 +141,7 @@ func (d *DHT) dial(ctx context.Context, st *udx.Stream, pk [32]byte, kp noise.Ke
 	answers := make(chan answer)
 	holders := d.holders(ctx, target)
 	found, waiting := 0, 0
-	for holders != nil || waiting > 0 || a.pending {
+	for holders != nil || waiting > 0 || a.producers > 0 {
 		select {
 		case h, ok := <-holders:
 			if !ok {
@@ -152,11 +167,13 @@ func (d *DHT) dial(ctx context.Context, st *udx.Stream, pk [32]byte, kp noise.Ke
 				return c, from, nil
 			}
 		case r := <-a.relayed:
-			a.pending = false
-			if r.err != nil {
-				return nil, nil, r.err
+			a.producers--
+			if r.err == nil {
+				return r.conn, r.addr, nil
 			}
-			return r.conn, r.addr, nil
+			if a.producers == 0 {
+				return nil, nil, r.err // no other path is still pending, so this error ends the dial
+			}
 		case <-ctx.Done():
 			return nil, nil, ctx.Err()
 		}
@@ -199,8 +216,9 @@ func (d *DHT) holders(ctx context.Context, target [32]byte) <-chan *net.UDPAddr 
 // connection when the answer verifies and the direct path claims the stream, nil when the answer does not count,
 // and an error when the connection fails after the handshake verified. An answer that does not verify leaves the
 // handshake as it was, since the check runs on a copy, so the next answer can still verify. The first verified
-// answer starts the relay path, if there is a relay on either side. An answer that comes from another address
-// than addr does not count, as upstream's peerHandshake rejects it (BAD_HANDSHAKE_REPLY).
+// answer starts the relay path, if there is a relay on either side, and then the punch or the direct claim, as
+// the connect's package comment says. An answer that comes from another address than addr does not count, as
+// upstream's peerHandshake rejects it (BAD_HANDSHAKE_REPLY).
 func (a *attempt) takeReply(ctx context.Context, addr *net.UDPAddr, resp *dhtrpc.Response, err error) (*Conn, *net.UDPAddr, error) {
 	if err != nil || resp.Error != 0 {
 		return nil, nil, nil
@@ -221,23 +239,38 @@ func (a *attempt) takeReply(ctx context.Context, addr *net.UDPAddr, resp *dhtrpc
 	if err != nil || p.Version != 1 || p.Error != 0 || p.UDX == nil || p.UDX.ID > math.MaxUint32 {
 		return nil, nil, nil
 	}
+	if a.started {
+		return nil, nil, nil // only the first verified reply acts, as upstream ignores replies once the connect has its path
+	}
+	a.started = true
 	keys := keysOf(&done)
-	if !a.started {
-		a.started = true
-		// The server's reply names its relay as the responder's, else this side's offer makes it the initiator.
-		switch {
-		case p.RelayThrough != nil:
-			a.startRelay(offerOf(p.RelayThrough), false, keys)
-		case a.offer != nil:
-			a.startRelay(*a.offer, true, keys)
-		}
+	serverAddr := addr // the server's address as the relay saw it, else the node that answered
+	if h.PeerAddress != nil {
+		serverAddr = udpAddrOf(*h.PeerAddress)
+	}
+	_, _, hash, _ := done.Result()
+	if a.punched {
+		// The punch seam: the hole punch claims the stream, and neither the direct path nor a relay does.
+		a.startPunch(punchReply{payload: p, serverAddr: addressOf(serverAddr), relayAddr: addressOf(addr), keys: keys, secret: punchSecret(hash)})
+		return nil, nil, nil
+	}
+	// The server's reply names its relay as the responder's, else this side's offer makes it the initiator.
+	switch {
+	case p.RelayThrough != nil:
+		a.startRelay(offerOf(p.RelayThrough), false, keys)
+	case a.offer != nil:
+		a.startRelay(*a.offer, true, keys)
 	}
 	if a.forced {
 		return nil, nil, nil // only the relay path may claim the stream
 	}
-	serverAddr := addr // the server's address as the relay saw it, else the node that answered
-	if h.PeerAddress != nil {
-		serverAddr = udpAddrOf(*h.PeerAddress)
+	// A reply that came through another node is relayed: the server's address is not the node asked (upstream's
+	// relayed). Upstream does not claim a relayed reply at the server address. It holepunches when the server names
+	// relays to punch through, and claims the server address only when it cannot (relayed and not holepunchable).
+	relayed := !serverAddr.IP.Equal(addr.IP) || serverAddr.Port != addr.Port
+	if relayed && holepunchable(p) {
+		a.startPunch(punchReply{payload: p, serverAddr: addressOf(serverAddr), relayAddr: addressOf(addr), keys: keys, secret: punchSecret(hash)})
+		return nil, nil, nil
 	}
 	if !a.claim.take() {
 		return nil, nil, nil // the relay path claimed the stream first
@@ -252,12 +285,17 @@ func (a *attempt) takeReply(ctx context.Context, addr *net.UDPAddr, resp *dhtrpc
 	return c, serverAddr, nil
 }
 
+// holepunchable reports whether the server's reply names relays to punch through (upstream's remoteHolepunchable).
+func holepunchable(p NoisePayload) bool {
+	return p.Holepunch != nil && len(p.Holepunch.Relays) > 0
+}
+
 // startRelay starts the relay path of the attempt: the stream pairs on the relay r and is claimed through the
 // pairing, then the secret stream's header exchange runs over it. The outcome goes to a.relayed, once. The path
 // does not end with the dial: as upstream's relayConnection, it dials the relay whether or not the direct path
 // claims the stream first, and it gives the pairing up once it has lost the claim.
 func (a *attempt) startRelay(r relayOffer, initiator bool, keys secretstream.Keys) {
-	a.pending = true
+	a.producers++
 	go func() {
 		rs, addr, err := a.d.pairRelay(context.Background(), &a.claim, a.st, r, initiator)
 		if err != nil {

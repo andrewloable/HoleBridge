@@ -26,6 +26,14 @@ Generated from spec/errors.json by go generate ./internal/errs. Do not edit by h
 
 **Fix:** chmod 600 ~/.config/holebridge/app.key
 
+## HB-CONFIG-DIR-PERMS
+
+**Problem:** the config directory is not owner-only
+
+**Cause:** The control socket lives in the config directory. The host and the relay do not serve while other users can enter it, or while another user owns it.
+
+**Fix:** chmod 700 ~/.config/holebridge
+
 ## HB-CONFIG-INVALID
 
 **Problem:** the configuration is not valid
@@ -49,6 +57,14 @@ Generated from spec/errors.json by go generate ./internal/errs. Do not edit by h
 **Cause:** A pairing code works for 5 minutes, so an old code is not accepted.
 
 **Fix:** On the TV, choose Add from phone again to show a new code.
+
+## HB-HANDOFF-REFUSED
+
+**Problem:** the TV did not accept the host
+
+**Cause:** A TV accepts a host only from a phone that scanned the code it is showing now. The code on the phone is old, or it came from another TV.
+
+**Fix:** On the TV, choose Add from phone to show a new code, then scan that code with the phone.
 
 ## HB-HANDOFF-UNREACHABLE
 
@@ -97,6 +113,30 @@ Generated from spec/errors.json by go generate ./internal/errs. Do not edit by h
 **Cause:** No host answered for this key. The host may be off, the key may be mistyped or from another deployment, or the network may block the connection.
 
 **Fix:** Check that the host is running and that the key is right. The app keeps trying on its own.
+
+## HB-NOT-RUNNING
+
+**Problem:** holebridge is not running
+
+**Cause:** holebridge status reads the control socket of a running host or relay in this config directory. No socket answers, so none is running here.
+
+**Fix:** Start one with holebridge host or holebridge relay, or pass --config for the directory of the one that runs.
+
+## HB-RELAY-KEY-MISSING
+
+**Problem:** there is no relay key in the config directory
+
+**Cause:** A relay runs under the relay key in relay.key. The hosts and apps that use the relay need the same key.
+
+**Fix:** Run holebridge relay --new-key to create relay.key, then put the same key in host.json (relay) and in the app under Settings, Relay.
+
+## HB-RELAY-KEY-PERMS
+
+**Problem:** relay.key can be read by other users
+
+**Cause:** The file holds the relay key, and anyone who has it can use the relay. The relay and relay check do not run while others can read it.
+
+**Fix:** chmod 600 ~/.config/holebridge/relay.key, or the file given to relay check
 
 ## HB-RELAY-REFUSED
 

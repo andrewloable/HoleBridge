@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
+	"runtime"
 	"testing"
 	"time"
 
 	"github.com/andrewloable/HoleBridge/internal/testvec"
+	"github.com/andrewloable/HoleBridge/pears/compact"
+	"github.com/andrewloable/HoleBridge/pears/secretstream"
 )
 
 // batchEntries reports how many messages a batch frame carries, and false when frame is not a batch.
@@ -292,3 +296,192 @@ func TestSplitBatchMatchesUpstream(t *testing.T) {
 		}
 	}
 }
+
+// nestedBatchFrame is a control batch whose one entry is another batch. The inner batch carries one message,
+// index 0 with payload "hi", on remote id 1, the channel the open frame names. Upstream never nests a batch,
+// so the frame is malformed, and the Mux must fail the stream without delivering the message.
+func nestedBatchFrame() []byte {
+	var msg compact.Encoder
+	msg.Uint(0)
+	msg.Raw([]byte("hi"))
+	var inner compact.Encoder // the inner batch body: remote id 1, then one length-prefixed message
+	inner.Uint(1)
+	inner.Buffer(msg.Bytes())
+	var nested compact.Encoder // an entry body: the batch type, then the inner batch body
+	nested.Uint(ctlBatch)
+	nested.Raw(inner.Bytes())
+	var outer compact.Encoder // a control frame: remote id 0, the batch type, remote id 0, then the entries
+	outer.Uint(0)
+	outer.Uint(ctlBatch)
+	outer.Uint(0)
+	outer.Buffer(nested.Bytes())
+	return outer.Bytes()
+}
+
+// openFrame is the frame that opens a "bulk" channel with local id 1 on a Mux, as upstream writes it.
+func openFrame(t *testing.T) []byte {
+	t.Helper()
+	s := newMemStream()
+	defer s.Close()
+	ch := New(s).CreateChannel(ChannelOptions{Protocol: "bulk"})
+	mustNoError(t, ch.Open(nil))
+	return s.sent()[0]
+}
+
+// Test case 7: a batch inside a batch is refused. The stream fails, and the message inside the inner batch is not
+// delivered. Before the fix the inner batch was decoded, and its message reached the handler.
+func TestNestedBatchIsRefused(t *testing.T) {
+	defer failOnPanic(t)
+	s := newMemStream()
+	defer s.Close()
+	m := New(s)
+	got := make(chan []byte, 1)
+	m.Pair("bulk", nil, func() {
+		ch := m.CreateChannel(ChannelOptions{Protocol: "bulk"})
+		ch.AddMessage(func(p []byte) { got <- bytes.Clone(p) })
+	})
+	s.in <- openFrame(t)
+	s.in <- nestedBatchFrame()
+	select {
+	case <-s.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream stayed open after a batch inside a batch")
+	}
+	select {
+	case p := <-got:
+		t.Errorf("a message inside a nested batch reached its handler: %q", p)
+	default:
+	}
+}
+
+// nestedFrame returns a control batch nested as deep as a frame of maxFrame bytes allows, about 2.4 million
+// levels at 7 bytes a level. Each level is an entry holding the next batch. Built from the inside out, as
+// the lengths of the inner levels are needed first.
+func nestedFrame() []byte {
+	// sizes[k] is the length of the entries of a batch nested k levels down. A level's entry is the batch
+	// type, the batch's remote id, and the entries of the level below, so its length is 2 plus sizes[k-1],
+	// and its header takes uintLen of that length.
+	sizes := []int{0}
+	for {
+		x := sizes[len(sizes)-1]
+		next := uintLen(2+x) + 2 + x
+		if 3+next > maxFrame {
+			break
+		}
+		sizes = append(sizes, next)
+	}
+	var e compact.Encoder
+	e.Uint(0) // the control session
+	e.Uint(ctlBatch)
+	e.Uint(0) // the outer batch's remote id
+	for k := len(sizes) - 1; k >= 1; k-- {
+		e.Uint(uint64(2 + sizes[k-1])) // the entry's length
+		e.Uint(ctlBatch)
+		e.Uint(0) // the inner batch's remote id
+	}
+	return e.Bytes()
+}
+
+// uintLen is the number of bytes the compact encoding takes for v.
+func uintLen(v int) int {
+	switch {
+	case v < 0xfd:
+		return 1
+	case v <= 0xffff:
+		return 3
+	case v <= 0xffffffff:
+		return 5
+	}
+	return 9
+}
+
+// Test case 8: a frame that nests a batch about 2.4 million levels deep, at the largest size a frame may have, fails
+// the stream and does not crash the process. Before the fix the read loop recursed once per level, past Go's
+// 1 GB stack limit, and the runtime aborted the whole test binary.
+func TestDeeplyNestedBatchFailsCleanly(t *testing.T) {
+	defer failOnPanic(t)
+	frame := nestedFrame()
+	if len(frame) > maxFrame {
+		t.Fatalf("nested frame is %d bytes, over maxFrame", len(frame))
+	}
+	s := newMemStream()
+	defer s.Close()
+	m := New(s)
+	_ = m
+	s.in <- openFrame(t)
+	s.in <- frame
+	select {
+	case <-s.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the stream stayed open after a deeply nested batch")
+	}
+}
+
+// frameMemStream is a memStream whose ReadFrame returns the next queued frame whole, as a secret stream does.
+type frameMemStream struct{ *memStream }
+
+func (s frameMemStream) ReadFrame() ([]byte, error) {
+	select {
+	case f := <-s.in:
+		return f, nil
+	case <-s.done:
+		return nil, io.EOF
+	}
+}
+
+// frameBufferLimit is how much an idle Mux may allocate. A Mux that holds a maxFrame read buffer allocates 16 MiB.
+const frameBufferLimit = 1 << 20
+
+// totalAlloc is the number of bytes allocated since the program started.
+func totalAlloc() uint64 {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return m.TotalAlloc
+}
+
+// Test case 9: an idle Mux holds no frame-sized read buffer. Forty Muxes that have read nothing allocate far less than
+// one frame buffer each, so connection churn does not leave 16 MiB resident per open connection.
+func TestIdleMuxAllocatesNoFrameBuffer(t *testing.T) {
+	const idle = 40
+	before := totalAlloc()
+	for i := 0; i < idle; i++ {
+		s := newMemStream()
+		t.Cleanup(func() { s.Close() })
+		New(frameMemStream{s})
+	}
+	time.Sleep(50 * time.Millisecond) // each read loop starts after New, and would allocate its buffer then
+	if per := (totalAlloc() - before) / idle; per > frameBufferLimit {
+		t.Errorf("an idle Mux allocated %d bytes, want under %d", per, frameBufferLimit)
+	}
+}
+
+// Test case 10: a frame of 1 MiB read through ReadFrame arrives whole, so its message arrives intact.
+func TestFrameReaderDeliversLargeFrameWhole(t *testing.T) {
+	const size = 1 << 20
+	bs := newMemStream()
+	defer bs.Close()
+	b := New(bs)
+	bch := b.CreateChannel(ChannelOptions{Protocol: "bulk"})
+	bmsg := bch.AddMessage(ignore)
+	mustNoError(t, bch.Open(nil))
+	payload := bytes.Repeat([]byte{0x5a}, size)
+	mustNoError(t, bmsg.Send(payload))
+
+	as := newMemStream()
+	defer as.Close()
+	a := New(frameMemStream{as})
+	got := make(chan []byte, 1)
+	a.Pair("bulk", nil, func() {
+		rc := a.CreateChannel(ChannelOptions{Protocol: "bulk"})
+		rc.AddMessage(func(p []byte) { got <- bytes.Clone(p) })
+	})
+	for _, f := range bs.sent() {
+		as.in <- f
+	}
+	if p := recvWithin(t, got); !bytes.Equal(p, payload) {
+		t.Errorf("a 1 MiB message arrived as %d bytes that differ from the payload", len(p))
+	}
+}
+
+// The secret stream that protomux reads in production is a FrameReader.
+var _ FrameReader = (*secretstream.Stream)(nil)

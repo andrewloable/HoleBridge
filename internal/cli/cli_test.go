@@ -78,6 +78,19 @@ func TestHelpListsEveryCommandAndExitsZero(t *testing.T) {
 	}
 }
 
+// Edge case: the help text shows --bootstrap on relay and on relay check, as docs/cli.md does.
+func TestHelpShowsBootstrapOnRelayCommands(t *testing.T) {
+	_, stdout, _ := run("--help")
+	for _, want := range []string{
+		"holebridge relay [--new-key | --bootstrap <host:port,...>]",
+		"holebridge relay check <relay-key-file> [--bootstrap <host:port,...>]",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("help does not show %q; stdout:\n%s", want, stdout)
+		}
+	}
+}
+
 // Case 3: no command, or an unknown command, exits 2 and prints HB-USAGE.
 func TestNoCommandOrUnknownCommandExitsTwoWithUsage(t *testing.T) {
 	cases := []struct {

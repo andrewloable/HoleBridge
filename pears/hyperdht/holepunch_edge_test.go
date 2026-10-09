@@ -35,9 +35,11 @@ func TestSecurePayloadRejectsTamperedAndForeignPayloads(t *testing.T) {
 	}
 }
 
-// TestAnswerHolepunchAbortsAndForgetsUnknownIDs checks the server's answer without a network: a probe that asks to
-// punch gets an abort, since the server does not punch yet; a relayed probe gets the token echo; an id no admitted
-// handshake holds, and a payload that does not decrypt, get no reply.
+// TestAnswerHolepunchAbortsAndForgetsUnknownIDs checks the server's answer without a network, for a handshake that
+// has no puncher (its puncher is made by setupHolepuncher, which this test does not call): a probe that asks to
+// punch gets an abort, since there is no puncher to punch with; a relayed probe gets the token echo; an id no
+// admitted handshake holds, and a payload that does not decrypt, get no reply. A handshake with a puncher answers
+// from it (answerWithPuncher), and its tests are the punch tests in punch_connect_test.go.
 func TestAnswerHolepunchAbortsAndForgetsUnknownIDs(t *testing.T) {
 	srv := (&DHT{}).CreateServer(ServerOptions{})
 	secret := [32]byte{5}

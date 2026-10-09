@@ -36,6 +36,8 @@ func (h *Host) serve(conn *hyperdht.Conn, lan bool) error {
 	defer conn.Destroy() // the transport goes whole: a peer that ignores END must not keep it
 
 	l := &link{h: h, done: make(chan struct{})}
+	h.addLink(l)
+	defer h.removeLink(l)
 	l.sess = mux.NewSession(mux.RoleHost, l, mux.Config{
 		Window:     uint64(h.limits.ReceiveWindowPerStream),
 		MaxStreams: h.limits.StreamsPerSession,
@@ -47,13 +49,16 @@ func (h *Host) serve(conn *hyperdht.Conn, lan bool) error {
 	// ordered queue (docs/architecture.md, UDP services).
 	q := newReplyQueue(h.limits.OrderedDatagramQueue, func(d protocol.Datagram) { _ = l.Send(d) })
 	defer q.close()
-	l.udp = h.udpTables(func(flow uint64, payload []byte) {
+	l.udpSend = func(flow uint64, payload []byte) {
 		if !lan && l.datagrams.Load() {
 			_ = conn.Send(protocol.EncodeUnordered(protocol.Datagram{Flow: flow, Payload: payload})) // a lost reply is as on any UDP path
 			return
 		}
 		q.offer(flow, payload)
-	})
+	}
+	l.udpShare = udpflow.NewCounter(h.limits.UDPFlowsPerSession)
+	l.udp = map[string]*udpflow.Table{}
+	l.addUDP()
 	defer l.closeUDP()
 	// The app's unordered datagrams (the DHT route) are messages of the connection, not of the channel. They
 	// are read until the connection's message channel closes at teardown, and go to the same tables as message
@@ -89,8 +94,18 @@ type link struct {
 	ch   *protomux.Channel
 	msgs []*protomux.Message // one per message index, in index order
 	sess *mux.Session
-	udp  map[string]*udpflow.Table // the flow table of each udp service, by name; fixed for the session
-	done chan struct{}             // closed when the connection ends
+	done chan struct{} // closed when the connection ends
+	// udp is the flow table of each udp service, by name. udpMu guards it, since a reload adds a table while the
+	// session runs. udpShare is the flow cap the tables share, and udpSend carries each reply.
+	udpMu     sync.RWMutex
+	udp       map[string]*udpflow.Table
+	udpClosed bool
+	udpShare  *udpflow.Counter
+	udpSend   func(flow uint64, payload []byte)
+	// openMu serialises the handshake with a services push, so that a push goes out only after the handshake did.
+	// opened is set once the handshake is out.
+	openMu sync.Mutex
+	opened bool
 	// datagrams is set when the app's handshake has FlagDatagrams, and the host's too: a DHT connection then
 	// carries the replies unordered. Set in onOpen, before any flow exists.
 	datagrams atomic.Bool
@@ -167,10 +182,25 @@ func (l *link) onOpen(raw []byte) {
 			l.end(err)
 			return
 		}
+		l.openMu.Lock()
+		defer l.openMu.Unlock()
 		if err := l.ch.Open(protocol.EncodeHandshake(l.h.handshake())); err != nil {
 			l.end(err)
+			return
 		}
+		l.opened = true
 	}
+}
+
+// pushServices sends a reload's services list to the app as message 8. A session whose handshake is not out yet
+// is skipped: its handshake takes the list from the host when it is built, under openMu.
+func (l *link) pushServices(list []protocol.Service) {
+	l.openMu.Lock()
+	defer l.openMu.Unlock()
+	if !l.opened {
+		return
+	}
+	_ = l.Send(protocol.Services{Services: list}) // a lost list ends with the session, as any message does
 }
 
 // negotiate sets the features of the session from the app's handshake flags. A feature is on when both sides
@@ -216,11 +246,13 @@ func (l *link) receive(index int) func([]byte) {
 func (l *link) route(msg any) error {
 	switch m := msg.(type) {
 	case protocol.Flow:
-		if t := l.udp[m.Service]; t != nil {
-			t.OnFlow(m)
+		if t := l.table(m.Service); t != nil {
+			l.startFlow(t, m)
 		}
 		return nil
 	case protocol.Datagram:
+		l.udpMu.RLock()
+		defer l.udpMu.RUnlock()
 		for _, t := range l.udp {
 			t.OnDatagram(m.Flow, m.Payload)
 		}
@@ -229,34 +261,61 @@ func (l *link) route(msg any) error {
 	return l.sess.Receive(msg)
 }
 
-// udpTables makes the session's flow tables: one per udp service, each with the service's idle time, or the
-// UDP flow idle of the limits when it has none (docs/architecture.md, UDP services). The tables share the
-// process's flow total and the session's flow cap, which counts the flows of all the session's tables. send
-// carries each reply, at once: the session's ordered queue, if any, is in send.
-func (h *Host) udpTables(send func(flow uint64, payload []byte)) map[string]*udpflow.Table {
-	tables := map[string]*udpflow.Table{}
-	perSession := udpflow.NewCounter(h.limits.UDPFlowsPerSession)
-	for name, svc := range h.services {
-		if !svc.udp {
+// startFlow takes a flow message on the session's message path. A flow that is open takes the payload here, in
+// order with the datagrams after it. A new flow is opened on its own goroutine: its target lookup can be slow, and
+// the session's other messages and its open flows must not wait for it. Datagrams that arrive while the flow is
+// still being dialed are dropped (udpflow.Table.OnFlow), as UDP allows.
+func (l *link) startFlow(t *udpflow.Table, f protocol.Flow) {
+	if t.Has(f.Flow) {
+		t.OnDatagram(f.Flow, f.Payload)
+		return
+	}
+	go t.OnFlow(f)
+}
+
+// table returns the flow table of the udp service name, or nil when the session has none.
+func (l *link) table(name string) *udpflow.Table {
+	l.udpMu.RLock()
+	defer l.udpMu.RUnlock()
+	return l.udp[name]
+}
+
+// addUDP gives the session a flow table for each udp service of the host that has none yet: all of them when the
+// session starts, and the new ones after a reload. Each table has its service's idle time, or the UDP flow idle of
+// the limits when it has none (docs/architecture.md, UDP services), and it resolves the target at each new flow,
+// so a reload's new target applies to new flows. The tables share the process's flow total and the session's flow
+// cap, and udpSend carries each reply, at once: the session's ordered queue, if any, is in it.
+func (l *link) addUDP() {
+	services := l.h.udpServices()
+	l.udpMu.Lock()
+	defer l.udpMu.Unlock()
+	if l.udpClosed {
+		return
+	}
+	for name, svc := range services {
+		if _, ok := l.udp[name]; ok {
 			continue
 		}
 		idle := svc.idle
 		if idle == 0 {
-			idle = time.Duration(h.limits.UDPFlowIdle)
+			idle = time.Duration(l.h.limits.UDPFlowIdle)
 		}
-		addr := svc.addr
-		tables[name] = udpflow.NewTable(udpflow.Config{
-			MaxDatagram: h.limits.MaxDatagram,
+		l.udp[name] = udpflow.NewTable(udpflow.Config{
+			MaxDatagram: l.h.limits.MaxDatagram,
 			Idle:        idle,
-			PerSession:  perSession,
-			Total:       h.udp,
-		}, send, func(string) (string, bool) { return addr, true }, h.clock)
+			PerSession:  l.udpShare,
+			Total:       l.h.udp,
+			Dial:        l.h.udpDial,
+		}, l.udpSend, l.h.udpTarget, l.h.clock)
 	}
-	return tables
 }
 
-// closeUDP closes the session's flow tables, and with them the flows' sockets.
+// closeUDP closes the session's flow tables, and with them the flows' sockets. A table addUDP makes after it is
+// not made.
 func (l *link) closeUDP() {
+	l.udpMu.Lock()
+	defer l.udpMu.Unlock()
+	l.udpClosed = true
 	for _, t := range l.udp {
 		t.Close()
 	}
@@ -286,6 +345,16 @@ func (w *watch) Read(p []byte) (int, error) {
 		w.end(err)
 	}
 	return n, err
+}
+
+// ReadFrame passes the frame reads of protomux through, so protomux needs no read buffer of its own.
+func (w *watch) ReadFrame() ([]byte, error) {
+	<-w.ready
+	frame, err := w.conn.ReadFrame()
+	if err != nil {
+		w.end(err)
+	}
+	return frame, err
 }
 
 func (w *watch) Write(p []byte) (int, error) {

@@ -57,10 +57,11 @@ type IO struct {
 	closeOne sync.Once
 	closeErr error
 
-	mu       sync.Mutex // guards inflight, nextTid and secrets
+	mu       sync.Mutex // guards inflight, nextTid, secrets and punch
 	inflight map[uint16]*pending
 	nextTid  uint16
 	secrets  [2][32]byte
+	punch    func(from *net.UDPAddr) // the holepunch datagrams, set by setPunch
 }
 
 // pending is a request that waits for its reply. The reader sends the reply on answer, once.
@@ -181,10 +182,19 @@ func (io *IO) rotateLoop() {
 }
 
 // onDatagram handles one datagram. Upstream drops a datagram from port 0, and this layout is IPv4
-// only, so other senders are dropped too. A datagram under 2 bytes does not decode, so it is dropped
-// by Decode.
+// only, so other senders are dropped too. A datagram under 2 bytes is a holepunch datagram: it goes to
+// the punch handler, never to Decode, as upstream's socket pool routes it (lib/socket-pool.js).
 func (io *IO) onDatagram(b []byte, from *net.UDPAddr) {
 	if from.Port == 0 || from.IP.To4() == nil {
+		return
+	}
+	if len(b) < 2 {
+		io.mu.Lock()
+		punch := io.punch
+		io.mu.Unlock()
+		if punch != nil {
+			punch(from)
+		}
 		return
 	}
 	v, err := Decode(b)
@@ -261,6 +271,13 @@ func (io *IO) unregister(tid uint16, p *pending) {
 	if io.inflight[tid] == p {
 		delete(io.inflight, tid)
 	}
+}
+
+// setPunch sets the handler of the holepunch datagrams that arrive on the IO's conn. A nil handler drops them.
+func (io *IO) setPunch(handler func(from *net.UDPAddr)) {
+	io.mu.Lock()
+	defer io.mu.Unlock()
+	io.punch = handler
 }
 
 // isClosed reports whether Close has been called.

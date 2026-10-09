@@ -566,3 +566,32 @@ func TestReadFrameAssemblesAFrameLongerThanItsFirstChunk(t *testing.T) {
 		t.Fatalf("readFrame returned %d bytes that differ from the %d sent", len(got), n)
 	}
 }
+
+// ReadFrame returns each message whole and in order, and skips a keepalive as Read does. No message is split
+// across calls, and the messages of separate writes are not joined.
+func TestReadFrameReturnsEachMessageWhole(t *testing.T) {
+	kpA, kpB := newKeyPair(t), newKeyPair(t)
+	c1, c2 := pipe(t)
+	a := newStream(t, c1, true, Options{KeyPair: kpA, RemotePublicKey: &kpB.Public})
+	b := newStream(t, c2, false, Options{KeyPair: kpB})
+	handshake(t, a, b)
+
+	msgs := [][]byte{[]byte("one"), randomBytes(t, 40<<10), {0x07}}
+	go func() {
+		_, _ = a.Write(msgs[0])
+		a.wmu.Lock()
+		_ = a.writeMessage(nil) // a keepalive
+		a.wmu.Unlock()
+		_, _ = a.Write(msgs[1])
+		_, _ = a.Write(msgs[2])
+	}()
+	for i, want := range msgs {
+		got, err := b.ReadFrame()
+		if err != nil {
+			t.Fatalf("ReadFrame %d: %v", i, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("ReadFrame %d returned %d bytes, want the %d bytes sent", i, len(got), len(want))
+		}
+	}
+}

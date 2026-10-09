@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"net"
+	"runtime"
 	"testing"
 	"time"
 
@@ -361,5 +362,32 @@ func TestPingNATRepliesToNamedPort(t *testing.T) {
 	}
 	if resp.Error != 0 {
 		t.Errorf("PING_NAT reply error = %d, want 0", resp.Error)
+	}
+}
+
+// Test case: a query whose replies arrive while the node becomes persistent does not race on the node's id. The
+// reply handling of the query reads the id to skip the node itself, and becomePersistent rewrites it when a probe
+// passes. Under the race detector (go test -race) the unlocked read raced with that write; without it, the test
+// checks that the query still walks and that the node ends persistent. Each call gets its own sampler, as the probe
+// of bootstrap does: becomePersistent makes the sampler the node's own.
+func TestQueryWhileNodeBecomesPersistent(t *testing.T) {
+	tn := startTestnet(t, 8)
+	n := newNode(t, Config{Bootstrap: tn.Bootstrap})
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	q := n.Query(ctx, QueryOpts{Target: queryTarget(), Command: cmdFindNode, Internal: true})
+	checkStarted(t, q)
+	port := nodeAddr(t, n).Port
+	for range 50 {
+		probe := newNATSampler(port)
+		for range 4 {
+			probe.add("127.0.0.1", port)
+		}
+		n.becomePersistent(probe)
+		runtime.Gosched()
+	}
+	drainQuery(t, q)
+	if n.ID() == nil {
+		t.Fatal("the node has no id after becoming persistent")
 	}
 }
